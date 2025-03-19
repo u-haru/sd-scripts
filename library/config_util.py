@@ -117,6 +117,7 @@ class DreamBoothDatasetParams(BaseDatasetParams):
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = False
     prior_loss_weight: float = 1.0
+    addift_enabled: bool = False
     
 @dataclass
 class FineTuningDatasetParams(BaseDatasetParams):
@@ -214,6 +215,9 @@ class ConfigSanitizer:
         "is_reg": bool,
         "alpha_mask": bool,
     }
+    DB_DATASET_DISTINCT_SCHEMA = {
+        "addift_enabled": bool,
+    }
     # FT means FineTuning
     FT_SUBSET_DISTINCT_SCHEMA = {
         Required("metadata_file"): str,
@@ -288,6 +292,7 @@ class ConfigSanitizer:
 
         self.db_dataset_schema = self.__merge_dict(
             self.DATASET_ASCENDABLE_SCHEMA,
+            self.DB_DATASET_DISTINCT_SCHEMA,
             self.SUBSET_ASCENDABLE_SCHEMA,
             self.DB_SUBSET_ASCENDABLE_SCHEMA,
             self.DO_SUBSET_ASCENDABLE_SCHEMA if support_dropout else {},

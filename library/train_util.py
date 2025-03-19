@@ -13,7 +13,7 @@ import re
 import shutil
 import time
 import typing
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Type, Union
 from accelerate import Accelerator, InitProcessGroupKwargs, DistributedDataParallelKwargs, PartialState
 import glob
 import math
@@ -208,7 +208,7 @@ class ImageInfo:
 
 
 class BucketManager:
-    def __init__(self, no_upscale, max_reso, min_size, max_size, reso_steps) -> None:
+    def __init__(self, no_upscale: bool, max_reso: tuple[int, int], min_size: int|None, max_size: int|None, reso_steps: int|None) -> None:
         if max_size is not None:
             if max_reso is not None:
                 assert max_size >= max_reso[0], "the max_size should be larger than the width of max_reso"
@@ -227,11 +227,11 @@ class BucketManager:
         self.max_size = max_size
         self.reso_steps = reso_steps
 
-        self.resos = []
-        self.reso_to_id = {}
-        self.buckets = []  # 前処理時は (image_key, image, original size, crop left/top)、学習時は image_key
+        self.resos: list[tuple[int, int]] = []
+        self.reso_to_id: dict[tuple[int, int], int] = {}
+        self.buckets: list[list[Union[str, ImageInfo]]] = []  # 前処理時はImageInfo、学習時は image_key
 
-    def add_image(self, reso, image_or_info):
+    def add_image(self, reso, image_or_info: Union[str, ImageInfo]):
         bucket_id = self.reso_to_id[reso]
         self.buckets[bucket_id].append(image_or_info)
 
@@ -277,7 +277,7 @@ class BucketManager:
         x = int(x + 0.5)
         return x - x % self.reso_steps
 
-    def select_bucket(self, image_width, image_height):
+    def select_bucket(self, image_width, image_height, image_info: Optional[ImageInfo] = None):
         aspect_ratio = image_width / image_height
         if not self.no_upscale:
             # 拡大および縮小を行う
@@ -687,6 +687,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.token_strings = None
 
         self.enable_bucket = False
+        self.bucket_class: Type[BucketManager] = BucketManager
         self.bucket_manager: BucketManager = None  # not initialized
         self.min_bucket_reso = None
         self.max_bucket_reso = None
@@ -997,7 +998,7 @@ class BaseDataset(torch.utils.data.Dataset):
         # bucketを作成し、画像をbucketに振り分ける
         if self.enable_bucket:
             if self.bucket_manager is None:  # fine tuningの場合でmetadataに定義がある場合は、すでに初期化済み
-                self.bucket_manager = BucketManager(
+                self.bucket_manager = self.bucket_class(
                     self.bucket_no_upscale,
                     (self.width, self.height),
                     self.min_bucket_reso,
@@ -1015,7 +1016,7 @@ class BaseDataset(torch.utils.data.Dataset):
             for image_info in self.image_data.values():
                 image_width, image_height = image_info.image_size
                 image_info.bucket_reso, image_info.resized_size, ar_error = self.bucket_manager.select_bucket(
-                    image_width, image_height
+                    image_width, image_height, image_info
                 )
 
                 # logger.info(image_info.image_key, image_info.bucket_reso)
@@ -1023,11 +1024,11 @@ class BaseDataset(torch.utils.data.Dataset):
 
             self.bucket_manager.sort()
         else:
-            self.bucket_manager = BucketManager(False, (self.width, self.height), None, None, None)
+            self.bucket_manager = self.bucket_class(False, (self.width, self.height), None, None, None)
             self.bucket_manager.set_predefined_resos([(self.width, self.height)])  # ひとつの固定サイズbucketのみ
             for image_info in self.image_data.values():
                 image_width, image_height = image_info.image_size
-                image_info.bucket_reso, image_info.resized_size, _ = self.bucket_manager.select_bucket(image_width, image_height)
+                image_info.bucket_reso, image_info.resized_size, _ = self.bucket_manager.select_bucket(image_width, image_height, image_info)
 
         for image_info in self.image_data.values():
             for _ in range(image_info.num_repeats):
@@ -1852,6 +1853,7 @@ class DreamBoothDataset(BaseDataset):
         debug_dataset: bool,
         validation_split: float,
         validation_seed: Optional[int],
+        addift_enabled: bool,
     ) -> None:
         super().__init__(resolution, network_multiplier, debug_dataset)
 
@@ -2117,6 +2119,22 @@ class DreamBoothDataset(BaseDataset):
 
         self.num_reg_images = num_reg_images
 
+        self.addift_enabled = addift_enabled
+        if self.addift_enabled:
+            from library.addift_util import ADDifTBucketManager
+            self.bucket_class = ADDifTBucketManager  # ADDifTの場合はADDifTBucketManagerを使う
+            self.batch_size *= 2  # ADDifTの場合はbatch_sizeを2倍にする (process_batch内で分割される)
+
+    def __len__(self):
+        # ADDifTの場合は交替学習のためデータ数を2倍にする
+        if self.addift_enabled:
+            return super().__len__() * 2
+        return super().__len__()
+
+    def __getitem__(self, index: int):
+        if self.addift_enabled:
+            return super().__getitem__(index//2)
+        return super().__getitem__(index)
 
 class FineTuningDataset(BaseDataset):
     def __init__(
@@ -2310,7 +2328,7 @@ class FineTuningDataset(BaseDataset):
             ), "if metadata has bucket info, bucket reso is precalculated, so bucket_no_upscale cannot be used / メタデータ内にbucket情報がある場合はbucketの解像度は計算済みのため、bucket_no_upscaleは使えません"
 
             # bucket情報を初期化しておく、make_bucketsで再作成しない
-            self.bucket_manager = BucketManager(False, None, None, None, None)
+            self.bucket_manager = self.bucket_class(False, None, None, None, None)
             self.bucket_manager.set_predefined_resos(resos)
 
         # npz情報をきれいにしておく
@@ -2412,6 +2430,7 @@ class ControlNetDataset(BaseDataset):
             debug_dataset,
             validation_split,
             validation_seed,
+            False,
         )
 
         # config_util等から参照される値をいれておく（若干微妙なのでなんとかしたい）
@@ -4545,6 +4564,18 @@ def add_dataset_arguments(
         parser.add_argument(
             "--reg_data_dir", type=str, default=None, help="directory for regularization images / 正則化画像データのディレクトリ"
         )
+        # ADDifT arguments
+        parser.add_argument(
+            "--addift_enabled",
+            action="store_true", 
+            help="Enable ADDifT (Alternating Direct Difference Training) mode / ADDifT（Alternating Direct Difference Training）モードを有効にする",
+        )
+        parser.add_argument(
+            "--addift_timesteps_segments",
+            type=int,
+            default=5,
+            help="Number of segments to divide timestep range into (default: 5) / タイムステップ範囲を分割するセグメント数（デフォルト: 5）",
+        )
 
     if support_caption:
         # caption dataset
@@ -5940,27 +5971,32 @@ def get_timesteps(min_timestep: int, max_timestep: int, b_size: int, device: tor
 
 
 def get_noise_noisy_latents_and_timesteps(
-    args, noise_scheduler, latents: torch.FloatTensor
+    args,
+    noise_scheduler,
+    latents: torch.FloatTensor,
+    timesteps: Optional[torch.IntTensor] = None,
+    noise: Optional[torch.FloatTensor] = None
 ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.IntTensor]:
     # Sample noise that we'll add to the latents
-    noise = torch.randn_like(latents, device=latents.device)
-    if args.noise_offset:
-        if args.noise_offset_random_strength:
-            noise_offset = torch.rand(1, device=latents.device) * args.noise_offset
-        else:
-            noise_offset = args.noise_offset
-        noise = custom_train_functions.apply_noise_offset(latents, noise, noise_offset, args.adaptive_noise_scale)
-    if args.multires_noise_iterations:
-        noise = custom_train_functions.pyramid_noise_like(
-            noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
-        )
+    if noise is None: 
+        noise = torch.randn_like(latents, device=latents.device)
+        if args.noise_offset:
+            if args.noise_offset_random_strength:
+                noise_offset = torch.rand(1, device=latents.device) * args.noise_offset
+            else:
+                noise_offset = args.noise_offset
+            noise = custom_train_functions.apply_noise_offset(latents, noise, noise_offset, args.adaptive_noise_scale)
+        if args.multires_noise_iterations:
+            noise = custom_train_functions.pyramid_noise_like(
+                noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
+            )
 
-    # Sample a random timestep for each image
-    b_size = latents.shape[0]
-    min_timestep = 0 if args.min_timestep is None else args.min_timestep
-    max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
-
-    timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
+    if timesteps is None:
+        # Sample a random timestep for each image
+        b_size = latents.shape[0]
+        min_timestep = 0 if args.min_timestep is None else args.min_timestep
+        max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+        timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
