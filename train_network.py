@@ -459,7 +459,6 @@ class NetworkTrainer:
                 self.addift_timesteps = addif_timesteps(min_t, max_t, args.addift_timesteps_segments, self.current_step//2, data_latents.shape[0]).to(latents.device)
             else:
                 data_latents, target_latents = target_latents, data_latents
-                data_text_encoder_conds, target_text_encoder_conds = target_text_encoder_conds, data_text_encoder_conds
                 data_batch, target_batch = target_batch, data_batch
             
             if getattr(self, "addift_timesteps", None) is None:
