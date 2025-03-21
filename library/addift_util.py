@@ -34,7 +34,7 @@ class ADDifTBucketManager(train_util.BucketManager):
         "*_targetと*が同じresoに配置されるようにオーバーライドして挙動を変更している"
         reso, resized_size, ar_error = super().select_bucket(image_width, image_height, image_info)
         if image_info is not None:
-            filename = os.path.splitext(image_info.image_key)[0].rstrip("_target")
+            filename = self._get_filename(image_info).rstrip("_target")
             if filename in self.filename_base_to_reso:
                 if reso != self.filename_base_to_reso[filename]:
                     logger.warning(f"{image_info.image_key}: bucket resolution mismatch ({reso} != {self.filename_base_to_reso[filename]}). Using {self.filename_base_to_reso[filename]}")
@@ -46,6 +46,14 @@ class ADDifTBucketManager(train_util.BucketManager):
                 self.filename_base_to_resized_size[filename] = resized_size
         return reso, resized_size, ar_error
 
+    @staticmethod
+    def _get_filename(image_or_info: str | train_util.ImageInfo) -> str:
+        if isinstance(image_or_info, str):
+            return os.path.splitext(os.path.basename(image_or_info))[0]
+        elif isinstance(image_or_info, train_util.ImageInfo):
+            return os.path.splitext(os.path.basename(image_or_info.image_key))[0]
+        raise ValueError(f"Unsupported type: {type(image_or_info)}")
+
     def shuffle(self):
         """
         それぞれのbucketがdata, target, data, target...となるように並び替える。
@@ -55,25 +63,19 @@ class ADDifTBucketManager(train_util.BucketManager):
         for reso in self.resos:
             bucket_id = self.reso_to_id[reso]
             bucket = self.buckets[bucket_id].copy()
-            bucket.sort(key=lambda x: x if isinstance(x, str) else x.image_key)
-            datas: list[str|train_util.ImageInfo] = []
-            targets: list[str|train_util.ImageInfo] = []
-            for j, image_or_info in enumerate(bucket):
-                filename: str
-                if isinstance(image_or_info, str):
-                    filename = os.path.splitext(image_or_info)[0]
-                elif isinstance(image_or_info, train_util.ImageInfo):
-                    filename = os.path.splitext(image_or_info.image_key)[0]
+            bucket.sort(key=lambda x: self._get_filename(x).removesuffix("_target"))
+            datas: list[tuple[str, str|train_util.ImageInfo]] = []
+            targets: list[tuple[str, str|train_util.ImageInfo]] = []
+            for image_or_info in bucket:
+                filename = self._get_filename(image_or_info)
                 if filename.endswith("_target"):
-                    targets.append(image_or_info)
+                    targets.append((filename, image_or_info))
                 else:
-                    datas.append(image_or_info)
+                    datas.append((filename, image_or_info))
 
             assert len(datas) == len(targets), f"Data and target count mismatch in bucket {reso}"
             pairs: list[tuple[str|train_util.ImageInfo, str|train_util.ImageInfo]] = []
-            for data, target in zip(datas, targets):
-                data_filename = os.path.splitext(data if isinstance(data, str) else data.image_key)[0]
-                target_filename = os.path.splitext(target if isinstance(target, str) else target.image_key)[0]
+            for (data_filename, data), (target_filename, target) in zip(datas, targets):
                 assert target_filename.startswith(data_filename), f"Data and target filename mismatch in bucket {reso}"
                 pairs.append((data, target))
             random.shuffle(pairs)
