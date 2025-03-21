@@ -482,7 +482,7 @@ class NetworkTrainer:
                     data_batch,
                 ).detach()
             network.set_enabled(True)
-            network.set_multiplier(0.25 if first else -0.25)
+            network.set_multiplier(args.addift_scale if first else -args.addift_scale)
             with accelerator.autocast():
                 target_noise_pred = _call_unet(
                     noisy_target_latents.to(accelerator.device).requires_grad_(train_unet),

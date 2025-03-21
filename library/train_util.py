@@ -4571,6 +4571,12 @@ def add_dataset_arguments(
             help="Enable ADDifT (Alternating Direct Difference Training) mode / ADDifT（Alternating Direct Difference Training）モードを有効にする",
         )
         parser.add_argument(
+            "--addift_scale",
+            type=float,
+            default=0.5,
+            help="scale for ADDifT (Alternating Direct Difference Training) / ADDifT（Alternating Direct Difference Training）のスケール",
+        )
+        parser.add_argument(
             "--addift_timesteps_segments",
             type=int,
             default=5,
