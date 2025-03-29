@@ -1526,6 +1526,9 @@ class BaseDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self._length
 
+    def flipped(self, index: int, image_info: ImageInfo, subset: Union[DreamBoothSubset, FineTuningSubset]) -> bool:
+        return subset.flip_aug and random.random() < 0.5  # not flipped or flipped with 50% chance
+
     def __getitem__(self, index):
         bucket = self.bucket_manager.buckets[self.buckets_indices[index].bucket_index]
         bucket_batch_size = self.buckets_indices[index].bucket_batch_size
@@ -1556,7 +1559,7 @@ class BaseDataset(torch.utils.data.Dataset):
             # in case of fine tuning, is_reg is always False
             loss_weights.append(self.prior_loss_weight if image_info.is_reg else 1.0)
 
-            flipped = subset.flip_aug and random.random() < 0.5  # not flipped or flipped with 50% chance
+            flipped = self.flipped(index, image_info, subset)
 
             # image/latentsを処理する
             if image_info.latents is not None:  # cache_latents=Trueの場合
@@ -2121,6 +2124,7 @@ class DreamBoothDataset(BaseDataset):
 
         self.addift_enabled = addift_enabled
         if self.addift_enabled:
+            self.step_flippeds: dict[int, bool] = {}
             from library.addift_util import ADDifTBucketManager
             self.bucket_class = ADDifTBucketManager  # ADDifTの場合はADDifTBucketManagerを使う
             self.batch_size *= 2  # ADDifTの場合はbatch_sizeを2倍にする (process_batch内で分割される)
@@ -2135,6 +2139,21 @@ class DreamBoothDataset(BaseDataset):
         if self.addift_enabled:
             return super().__getitem__(index//2)
         return super().__getitem__(index)
+
+    def shuffle_buckets(self):
+        if self.addift_enabled:
+            self.step_flippeds.clear()  # clear flipped cache
+        return super().shuffle_buckets()
+
+    def flipped(self, index, image_info, subset) -> bool:
+        if self.addift_enabled:
+            if index in self.step_flippeds:
+                return self.step_flippeds[index]
+            else:
+                flipped = super().flipped(index, image_info, subset)
+                self.step_flippeds[index] = flipped
+                return flipped
+        return super().flipped(index, image_info, subset)
 
 class FineTuningDataset(BaseDataset):
     def __init__(
