@@ -26,7 +26,7 @@ from diffusers import DDPMScheduler
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from library import deepspeed_utils, model_util, strategy_base, strategy_sd
 
-from library.addift_util import split_batch_data_target, addif_timesteps
+from library.addift_util import split_batch_data_target, addift_timesteps
 import library.train_util as train_util
 from library.train_util import DreamBoothDataset
 import library.config_util as config_util
@@ -456,7 +456,7 @@ class NetworkTrainer:
 
             if first:
                 min_t, max_t = args.min_timestep or 500, args.max_timestep or 1000
-                self.addift_timesteps = addif_timesteps(min_t, max_t, args.addift_timesteps_segments, self.current_step//2, data_latents.shape[0]).to(latents.device)
+                self.addift_timesteps = addift_timesteps(min_t, max_t, args.addift_timesteps_segments, self.current_step//2, data_latents.shape[0]).to(latents.device)
             else:
                 data_latents, target_latents = target_latents, data_latents
                 data_batch, target_batch = target_batch, data_batch
