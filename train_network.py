@@ -1245,6 +1245,9 @@ class NetworkTrainer:
                 vae_name = os.path.basename(vae_name)
             metadata["ss_vae_name"] = vae_name
 
+        if args.addift_enabled:
+            metadata["ss_addift_enabled"] = args.addift_enabled
+
         metadata = {k: str(v) for k, v in metadata.items()}
 
         # make minimum metadata for filtering
