@@ -63,6 +63,7 @@ class ADDifTBucketManager(train_util.BucketManager):
         for reso in self.resos:
             bucket_id = self.reso_to_id[reso]
             bucket = self.buckets[bucket_id].copy()
+            random.shuffle(bucket)  # 同じ名前のものがランダムに並ぶようにする
             bucket.sort(key=lambda x: self._get_filename(x).removesuffix("_target"))
             datas: list[tuple[str, str|train_util.ImageInfo]] = []
             targets: list[tuple[str, str|train_util.ImageInfo]] = []
