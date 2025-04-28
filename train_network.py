@@ -1247,6 +1247,7 @@ class NetworkTrainer:
 
         if args.addift_enabled:
             metadata["ss_addift_enabled"] = args.addift_enabled
+            metadata["ss_addift_scale"] = args.addift_scale
 
         metadata = {k: str(v) for k, v in metadata.items()}
 
