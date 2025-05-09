@@ -501,7 +501,7 @@ class NetworkTrainer:
                     data_batch,
                 ).detach()
             network.set_enabled(True)
-            network.set_multiplier(args.addift_scale if first else -args.addift_scale)
+            network.set_multiplier(args.addift_scale if first else -args.addift_scale * args.addift_diff_ratio)
             with accelerator.autocast():
                 target_noise_pred = _call_unet(
                     noisy_target_latents.to(accelerator.device).requires_grad_(train_unet),
@@ -1273,6 +1273,7 @@ class NetworkTrainer:
         if args.addift_enabled:
             metadata["ss_addift_enabled"] = args.addift_enabled
             metadata["ss_addift_scale"] = args.addift_scale
+            metadata["ss_addift_diff_ratio"] = args.addift_diff_ratio
 
         metadata = {k: str(v) for k, v in metadata.items()}
 

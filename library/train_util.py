@@ -4620,7 +4620,13 @@ def add_dataset_arguments(
             "--addift_scale",
             type=float,
             default=0.5,
-            help="scale for ADDifT (Alternating Direct Difference Training) / ADDifT（Alternating Direct Difference Training）のスケール",
+            help="scale for ADDifT / ADDifのスケール",
+        )
+        parser.add_argument(
+            "--addift_diff_ratio",
+            type=float,
+            default=1.0,
+            help="diff ratio for ADDifT / ADDifの反転学習の差分比率",
         )
         parser.add_argument(
             "--addift_timesteps_segments",
