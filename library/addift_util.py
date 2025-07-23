@@ -9,7 +9,7 @@ import library.train_util as train_util
 
 logger = logging.getLogger(__name__)
 
-def addift_timesteps(min_t: int, max_t: int, num_segments: int, training_step: int, b_size: int = 1) -> torch.Tensor:
+def addift_timesteps(min_t: int, max_t: int, num_segments: int, training_step: int, b_size: int = 1) -> torch.IntTensor:
     """
     ADDifT用のtimestepsを生成する関数。
     min_tとmax_tの間をnum_segmentsで分割し、training_stepに応じてその中からランダムにtimestepsを生成する。
@@ -21,7 +21,7 @@ def addift_timesteps(min_t: int, max_t: int, num_segments: int, training_step: i
     if training_step is None:
         current_segment = (current_segment + 1) % num_segments
     timesteps = torch.randint(start, end, (b_size,), device="cpu")  # updated to use instance variables
-    return timesteps
+    return timesteps # type: ignore
 
 class ADDifTBucketManager(train_util.BucketManager):
     def __init__(self, no_upscale, max_reso, min_size, max_size, reso_steps):
