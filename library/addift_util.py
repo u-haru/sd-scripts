@@ -18,10 +18,15 @@ def get_addift_timesteps(min_t: int, max_t: int, num_segments: int, training_ste
     current_segment = training_step % num_segments
     start = min_t + (current_segment * segment_size)
     end = min(start + segment_size, max_t)
-    if training_step is None:
-        current_segment = (current_segment + 1) % num_segments
     timesteps = torch.randint(start, end, (b_size,), device="cpu")  # updated to use instance variables
     return timesteps # type: ignore
+
+def map_addift_range(range_min: float, range_max: float, num_segments: int, max_timesteps:int, training_step: int, x: torch.Tensor) -> torch.Tensor:
+    segment_size = (range_max - range_min) / num_segments
+    current_segment = training_step % num_segments
+    start = range_min + (current_segment * segment_size)
+    end = min(start + segment_size, range_max)
+    return x * ((end - start) / max_timesteps) + start
 
 class ADDifTBucketManager(train_util.BucketManager):
     def __init__(self, no_upscale, max_reso, min_size, max_size, reso_steps):

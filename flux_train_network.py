@@ -11,6 +11,8 @@ from library.device_utils import clean_memory_on_device, init_ipex
 
 init_ipex()
 
+from library.addift_util import map_addift_range
+from library.custom_train_functions import apply_masked_loss
 import train_network
 from library import (
     flux_models,
@@ -268,22 +270,64 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
             text_encoders[0].to(accelerator.device, dtype=weight_dtype)
             text_encoders[1].to(accelerator.device)
 
-    # def call_unet(self, args, accelerator, unet, noisy_latents, timesteps, text_conds, batch, weight_dtype):
-    #     noisy_latents = noisy_latents.to(weight_dtype)  # TODO check why noisy_latents is not weight_dtype
+    def call_unet(
+        self,
+        args,
+        accelerator,
+        unet,
+        noisy_latents,
+        timesteps,
+        text_conds,
+        batch,
+        weight_dtype,
+        indices: Optional[list[int]] = None,
+    ):
+        bsz = noisy_latents.shape[0]
+        # pack latents and get img_ids
+        packed_noisy_model_input = flux_utils.pack_latents(noisy_latents)  # b, c, h*2, w*2 -> b, h*w, c*4
+        packed_latent_height, packed_latent_width = noisy_latents.shape[2] // 2, noisy_latents.shape[3] // 2
+        img_ids = flux_utils.prepare_img_ids(bsz, packed_latent_height, packed_latent_width).to(device=accelerator.device)
 
-    #     # get size embeddings
-    #     orig_size = batch["original_sizes_hw"]
-    #     crop_size = batch["crop_top_lefts"]
-    #     target_size = batch["target_sizes_hw"]
-    #     embs = sdxl_train_util.get_size_embeddings(orig_size, crop_size, target_size, accelerator.device).to(weight_dtype)
+        # get guidance
+        # ensure guidance_scale in args is float
+        guidance_vec = torch.full((bsz,), float(args.guidance_scale), device=accelerator.device)
 
-    #     # concat embeddings
-    #     encoder_hidden_states1, encoder_hidden_states2, pool2 = text_conds
-    #     vector_embedding = torch.cat([pool2, embs], dim=1).to(weight_dtype)
-    #     text_embedding = torch.cat([encoder_hidden_states1, encoder_hidden_states2], dim=2).to(weight_dtype)
+        # ensure the hidden state will require grad
+        if args.gradient_checkpointing:
+            noisy_latents.requires_grad_(True)
+            for t in text_conds:
+                if t is not None and t.dtype.is_floating_point:
+                    t.requires_grad_(True)
+            img_ids.requires_grad_(True)
+            guidance_vec.requires_grad_(True)
 
-    #     noise_pred = unet(noisy_latents, timesteps, text_embedding, vector_embedding)
-    #     return noise_pred
+        # Predict the noise residual
+        l_pooled, t5_out, txt_ids, t5_attn_mask = text_conds
+        if not args.apply_t5_attn_mask:
+            t5_attn_mask = None
+            
+        if indices is not None and len(indices) > 0:
+            packed_noisy_model_input=packed_noisy_model_input[indices]
+            img_ids=img_ids[indices]
+            t5_out=t5_out[indices]
+            txt_ids=txt_ids[indices]
+            l_pooled=l_pooled[indices]
+            timesteps=timesteps[indices]
+            guidance_vec=guidance_vec[indices]
+            t5_attn_mask=t5_attn_mask[indices] if t5_attn_mask is not None else None
+
+        noise_pred = unet(
+            img=packed_noisy_model_input,
+            img_ids=img_ids,
+            txt=t5_out,
+            txt_ids=txt_ids,
+            y=l_pooled,
+            timesteps=timesteps / 1000,
+            guidance=guidance_vec,
+            txt_attention_mask=t5_attn_mask,
+        )
+        noise_pred = flux_utils.unpack_latents(noise_pred, packed_latent_height, packed_latent_width)
+        return noise_pred
 
     def sample_images(self, accelerator, args, epoch, global_step, device, ae, tokenizer, text_encoder, flux):
         text_encoders = text_encoder  # for compatibility
@@ -350,65 +394,23 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
     ):
         # Sample noise that we'll add to the latents
         noise = torch.randn_like(latents)
-        bsz = latents.shape[0]
 
         # get noisy model input and timesteps
         noisy_model_input, timesteps, sigmas = flux_train_utils.get_noisy_model_input_and_timesteps(
             args, noise_scheduler, latents, noise, accelerator.device, weight_dtype
         )
 
-        # pack latents and get img_ids
-        packed_noisy_model_input = flux_utils.pack_latents(noisy_model_input)  # b, c, h*2, w*2 -> b, h*w, c*4
-        packed_latent_height, packed_latent_width = noisy_model_input.shape[2] // 2, noisy_model_input.shape[3] // 2
-        img_ids = flux_utils.prepare_img_ids(bsz, packed_latent_height, packed_latent_width).to(device=accelerator.device)
-
-        # get guidance
-        # ensure guidance_scale in args is float
-        guidance_vec = torch.full((bsz,), float(args.guidance_scale), device=accelerator.device)
-
-        # ensure the hidden state will require grad
-        if args.gradient_checkpointing:
-            noisy_model_input.requires_grad_(True)
-            for t in text_encoder_conds:
-                if t is not None and t.dtype.is_floating_point:
-                    t.requires_grad_(True)
-            img_ids.requires_grad_(True)
-            guidance_vec.requires_grad_(True)
-
-        # Predict the noise residual
-        l_pooled, t5_out, txt_ids, t5_attn_mask = text_encoder_conds
-        if not args.apply_t5_attn_mask:
-            t5_attn_mask = None
-
-        def call_dit(img, img_ids, t5_out, txt_ids, l_pooled, timesteps, guidance_vec, t5_attn_mask):
-            # grad is enabled even if unet is not in train mode, because Text Encoder is in train mode
-            with torch.set_grad_enabled(is_train), accelerator.autocast():
-                # YiYi notes: divide it by 1000 for now because we scale it by 1000 in the transformer model (we should not keep it but I want to keep the inputs same for the model for testing)
-                model_pred = unet(
-                    img=img,
-                    img_ids=img_ids,
-                    txt=t5_out,
-                    txt_ids=txt_ids,
-                    y=l_pooled,
-                    timesteps=timesteps / 1000,
-                    guidance=guidance_vec,
-                    txt_attention_mask=t5_attn_mask,
-                )
-            return model_pred
-
-        model_pred = call_dit(
-            img=packed_noisy_model_input,
-            img_ids=img_ids,
-            t5_out=t5_out,
-            txt_ids=txt_ids,
-            l_pooled=l_pooled,
-            timesteps=timesteps,
-            guidance_vec=guidance_vec,
-            t5_attn_mask=t5_attn_mask,
-        )
-
-        # unpack latents
-        model_pred = flux_utils.unpack_latents(model_pred, packed_latent_height, packed_latent_width)
+        with torch.set_grad_enabled(is_train), accelerator.autocast():
+            model_pred = self.call_unet(
+                args,
+                accelerator,
+                unet,
+                noisy_model_input.requires_grad_(train_unet),
+                timesteps,
+                text_encoder_conds,
+                batch,
+                weight_dtype,
+            )
 
         # apply model prediction type
         model_pred, weighting = flux_train_utils.apply_model_prediction_type(args, model_pred, noisy_model_input, sigmas)
@@ -427,19 +429,19 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 network.set_multiplier(0.0)
                 unet.prepare_block_swap_before_forward()
                 with torch.no_grad():
-                    model_pred_prior = call_dit(
-                        img=packed_noisy_model_input[diff_output_pr_indices],
-                        img_ids=img_ids[diff_output_pr_indices],
-                        t5_out=t5_out[diff_output_pr_indices],
-                        txt_ids=txt_ids[diff_output_pr_indices],
-                        l_pooled=l_pooled[diff_output_pr_indices],
-                        timesteps=timesteps[diff_output_pr_indices],
-                        guidance_vec=guidance_vec[diff_output_pr_indices] if guidance_vec is not None else None,
-                        t5_attn_mask=t5_attn_mask[diff_output_pr_indices] if t5_attn_mask is not None else None,
+                    model_pred_prior = self.call_unet(
+                        args,
+                        accelerator,
+                        unet,
+                        noisy_model_input,
+                        timesteps,
+                        text_encoder_conds,
+                        batch,
+                        weight_dtype,
+                        indices=diff_output_pr_indices,
                     )
                 network.set_multiplier(1.0)  # may be overwritten by "network_multipliers" in the next step
 
-                model_pred_prior = flux_utils.unpack_latents(model_pred_prior, packed_latent_height, packed_latent_width)
                 model_pred_prior, _ = flux_train_utils.apply_model_prediction_type(
                     args,
                     model_pred_prior,
@@ -449,6 +451,88 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 target[diff_output_pr_indices] = model_pred_prior.to(target.dtype)
 
         return model_pred, target, timesteps, weighting
+
+    def addift_process_batch(
+        self,
+        data_batch,
+        target_batch,
+        data_latents,
+        target_latents,
+        data_text_encoder_conds,
+        target_text_encoder_conds,
+        unet,
+        network,
+        noise_scheduler,
+        weight_dtype,
+        accelerator,
+        args,
+        train_unet=True,
+        first=False,
+    ):
+        def _call_unet(_noisy_latents, _timesteps, _text_encoder_conds, _batch, _sigmas):
+            latents_pred = self.call_unet(
+                args,
+                accelerator,
+                unet,
+                _noisy_latents,
+                _timesteps,
+                _text_encoder_conds,
+                _batch,
+                weight_dtype,
+            )
+            # apply model prediction type
+            latents_pred, _ = flux_train_utils.apply_model_prediction_type(args, latents_pred, _noisy_latents, _sigmas)
+            if args.masked_loss or ("alpha_masks" in _batch and _batch["alpha_masks"] is not None):
+                latents_pred = apply_masked_loss(latents_pred, _batch)
+            return latents_pred
+
+
+        if first:
+            min_t = 0 if args.min_timestep is None else args.min_timestep
+            max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+            sigmas, addift_timesteps = flux_train_utils.get_sigma_and_timesteps(
+                args, noise_scheduler, data_latents, accelerator.device, weight_dtype
+            )
+            sigmas = map_addift_range(min_t/noise_scheduler.config.num_train_timesteps, max_t/noise_scheduler.config.num_train_timesteps, args.addift_timesteps_segments, 1, self.current_step//2, sigmas)
+            addift_timesteps = map_addift_range(min_t, max_t, args.addift_timesteps_segments, noise_scheduler.config.num_train_timesteps, self.current_step//2, addift_timesteps)
+            self.addift_timesteps = (addift_timesteps, sigmas)
+        addift_timesteps, sigmas = self.addift_timesteps
+
+        noise = torch.randn_like(data_latents)
+        noisy_data_latents, _, _ = flux_train_utils.get_noisy_model_input_and_timesteps(
+            args, noise_scheduler, data_latents, noise, accelerator.device, weight_dtype, timesteps=addift_timesteps, sigmas=sigmas
+        )
+        noisy_target_latents, _, _ = flux_train_utils.get_noisy_model_input_and_timesteps(
+            args, noise_scheduler, target_latents, noise, accelerator.device, weight_dtype, timesteps=addift_timesteps, sigmas=sigmas
+        )
+
+        network.set_enabled(False)
+
+        #    target_noise_pred = noise - target_latents
+        # -) data_noise_pred   = noise - data_latents
+        # ===============================================
+        #    target_noise_pred - data_noise_pred = data_latents    - target_latents
+        #    target_noise_pred + target_latents  = data_noise_pred + data_latents
+        with torch.no_grad(), accelerator.autocast():
+            data_noise_pred = (_call_unet(
+                noisy_data_latents.to(accelerator.device),
+                addift_timesteps,
+                data_text_encoder_conds,
+                data_batch,
+                sigmas,
+            ) + data_latents).detach()
+        network.set_enabled(True)
+        network.set_multiplier(args.addift_scale if first else -args.addift_scale * args.addift_diff_ratio)
+        with accelerator.autocast():
+            target_noise_pred = _call_unet(
+                noisy_target_latents.to(accelerator.device).requires_grad_(train_unet),
+                addift_timesteps,
+                target_text_encoder_conds,
+                target_batch,
+                sigmas,
+            ) + target_latents
+
+        return data_noise_pred, target_noise_pred, addift_timesteps
 
     def post_process_loss(self, loss, args, timesteps, noise_scheduler):
         return loss

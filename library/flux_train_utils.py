@@ -468,9 +468,9 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
     return weighting
 
 
-def get_noisy_model_input_and_timesteps(
-    args, noise_scheduler, latents: torch.Tensor, noise: torch.Tensor, device, dtype
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def get_sigma_and_timesteps(
+    args, noise_scheduler, latents: torch.Tensor, device, dtype,
+):
     bsz, _, h, w = latents.shape
     assert bsz > 0, "Batch size not large enough"
     num_timesteps = noise_scheduler.config.num_train_timesteps
@@ -510,6 +510,21 @@ def get_noisy_model_input_and_timesteps(
         indices = (u * num_timesteps).long()
         timesteps = noise_scheduler.timesteps[indices].to(device=device)
         sigmas = get_sigmas(noise_scheduler, timesteps, device, n_dim=latents.ndim, dtype=dtype)
+    return sigmas, timesteps
+
+def get_noisy_model_input_and_timesteps(
+    args,
+    noise_scheduler,
+    latents: torch.Tensor,
+    noise: torch.Tensor,
+    device,
+    dtype,
+    timesteps: Optional[torch.IntTensor] = None,
+    sigmas: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.IntTensor, torch.Tensor]:
+    if timesteps is None or sigmas is None:
+        # Get random timesteps and sigmas
+        sigmas, timesteps = get_sigma_and_timesteps(args, noise_scheduler, latents, device, dtype)
 
     # Broadcast sigmas to latent shape
     sigmas = sigmas.view(-1, 1, 1, 1)
