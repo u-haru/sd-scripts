@@ -26,7 +26,7 @@ from diffusers import DDPMScheduler
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from library import deepspeed_utils, model_util, strategy_base, strategy_sd
 
-from library.addift_util import split_batch_data_target, addift_timesteps
+from library.addift_util import split_batch_data_target, get_addift_timesteps
 import library.train_util as train_util
 from library.train_util import DreamBoothDataset
 import library.config_util as config_util
@@ -365,6 +365,73 @@ class NetworkTrainer:
 
     # endregion
 
+    def addift_process_batch(
+        self,
+        data_batch,
+        target_batch,
+        data_latents,
+        target_latents,
+        data_text_encoder_conds,
+        target_text_encoder_conds,
+        unet,
+        network,
+        noise_scheduler,
+        weight_dtype,
+        accelerator,
+        args,
+        train_unet=True,
+        first=False,
+    ):
+        def _call_unet(_noisy_latents, _timesteps, _text_encoder_conds, _batch):
+            latents_pred = self.call_unet(
+                args,
+                accelerator,
+                unet,
+                _noisy_latents,
+                _timesteps,
+                _text_encoder_conds,
+                _batch,
+                weight_dtype,
+            )
+            if args.masked_loss or ("alpha_masks" in _batch and _batch["alpha_masks"] is not None):
+                latents_pred = apply_masked_loss(latents_pred, _batch)
+            return latents_pred
+
+        if first:
+            min_t = 0 if args.min_timestep is None else args.min_timestep
+            max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+            self.addift_timesteps = get_addift_timesteps(min_t, max_t, args.addift_timesteps_segments, self.current_step//2, data_latents.shape[0]).to(data_latents.device)
+
+        noise, noisy_data_latents, _ = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, data_latents, self.addift_timesteps)
+        _, noisy_target_latents, _ = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, target_latents, self.addift_timesteps, noise)
+
+        network.set_enabled(False)
+
+        if args.gradient_checkpointing:
+            for x in noisy_target_latents:
+                x.requires_grad_(True)
+            for t in target_text_encoder_conds:
+                t.requires_grad_(True)
+
+        with torch.no_grad(), accelerator.autocast():
+            data_noise_pred = _call_unet(
+                noisy_data_latents.to(accelerator.device),
+                self.addift_timesteps,
+                data_text_encoder_conds,
+                data_batch,
+            ).detach()
+        network.set_enabled(True)
+        network.set_multiplier(args.addift_scale if first else -args.addift_scale * args.addift_diff_ratio)
+        with accelerator.autocast():
+            target_noise_pred = _call_unet(
+                noisy_target_latents.to(accelerator.device).requires_grad_(train_unet),
+                self.addift_timesteps,
+                target_text_encoder_conds,
+                target_batch,
+            )
+
+        return data_noise_pred, target_noise_pred, self.addift_timesteps
+
     def process_batch(
         self,
         batch,
@@ -450,21 +517,6 @@ class NetworkTrainer:
 
         # ADDifTを使う場合
         if args.addift_enabled:
-            def _call_unet(_noisy_latents, _timesteps, _text_encoder_conds, _batch):
-                latents_pred = self.call_unet(
-                    args,
-                    accelerator,
-                    unet,
-                    _noisy_latents,
-                    _timesteps,
-                    _text_encoder_conds,
-                    _batch,
-                    weight_dtype,
-                )
-                if args.masked_loss or ("alpha_masks" in _batch and _batch["alpha_masks"] is not None):
-                    latents_pred = apply_masked_loss(latents_pred, _batch)
-                return latents_pred
-
             first = (self.current_step % 2) == 0
 
             data_batch, target_batch = split_batch_data_target(batch)
@@ -473,49 +525,32 @@ class NetworkTrainer:
             data_text_encoder_conds = [c[0:-1:2] for c in text_encoder_conds]
             target_text_encoder_conds = [c[1::2] for c in text_encoder_conds]
 
-            if first:
-                min_t = 0 if args.min_timestep is None else args.min_timestep
-                max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
-                self.addift_timesteps = addift_timesteps(min_t, max_t, args.addift_timesteps_segments, self.current_step//2, data_latents.shape[0]).to(latents.device)
-            else:
+            if not first:
                 data_latents, target_latents = target_latents, data_latents
                 data_batch, target_batch = target_batch, data_batch
-            
-            if getattr(self, "addift_timesteps", None) is None:
-                raise ValueError("Broken ADDifT timesteps")
 
-            noise, noisy_data_latents, _ = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, data_latents, self.addift_timesteps)
-            _, noisy_target_latents, _ = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, target_latents, self.addift_timesteps, noise)
+            data_noise_pred, target_noise_pred, addift_timesteps = self.addift_process_batch(
+                data_batch,
+                target_batch,
+                data_latents,
+                target_latents,
+                data_text_encoder_conds,
+                target_text_encoder_conds,
+                unet,
+                network,
+                noise_scheduler,
+                weight_dtype,
+                accelerator,
+                args,
+                train_unet=train_unet,
+                first=first,
+            )
 
-            if args.gradient_checkpointing:
-                for x in noisy_target_latents:
-                    x.requires_grad_(True)
-                for t in target_text_encoder_conds:
-                    t.requires_grad_(True)
-
-            network.set_enabled(False)
-            with torch.no_grad(), accelerator.autocast():
-                data_noise_pred = _call_unet(
-                    noisy_data_latents.to(accelerator.device),
-                    self.addift_timesteps,
-                    data_text_encoder_conds,
-                    data_batch,
-                ).detach()
-            network.set_enabled(True)
-            network.set_multiplier(args.addift_scale if first else -args.addift_scale * args.addift_diff_ratio)
-            with accelerator.autocast():
-                target_noise_pred = _call_unet(
-                    noisy_target_latents.to(accelerator.device).requires_grad_(train_unet),
-                    self.addift_timesteps,
-                    target_text_encoder_conds,
-                    target_batch,
-                )
-
-            huber_c = train_util.get_huber_threshold_if_needed(args, self.addift_timesteps, noise_scheduler)
+            huber_c = train_util.get_huber_threshold_if_needed(args, addift_timesteps, noise_scheduler)
             loss = train_util.conditional_loss(target_noise_pred.float(), data_noise_pred.float(), args.loss_type, "none", huber_c).to(target_latents.device)
             loss = loss.mean([1, 2, 3])
             loss = loss * data_batch["loss_weights"] * target_batch["loss_weights"]
-            loss = self.post_process_loss(loss, args, self.addift_timesteps, noise_scheduler)
+            loss = self.post_process_loss(loss, args, addift_timesteps, noise_scheduler)
             return loss.mean()
 
         # sample noise, call unet, get target
