@@ -510,6 +510,9 @@ def get_sigma_and_timesteps(
         indices = (u * num_timesteps).long()
         timesteps = noise_scheduler.timesteps[indices].to(device=device)
         sigmas = get_sigmas(noise_scheduler, timesteps, device, n_dim=latents.ndim, dtype=dtype)
+
+    # Broadcast sigmas to latent shape
+    sigmas = sigmas.view(-1, 1, 1, 1)
     return sigmas, timesteps
 
 def get_noisy_model_input_and_timesteps(
@@ -525,9 +528,6 @@ def get_noisy_model_input_and_timesteps(
     if timesteps is None or sigmas is None:
         # Get random timesteps and sigmas
         sigmas, timesteps = get_sigma_and_timesteps(args, noise_scheduler, latents, device, dtype)
-
-    # Broadcast sigmas to latent shape
-    sigmas = sigmas.view(-1, 1, 1, 1)
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
