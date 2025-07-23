@@ -413,6 +413,11 @@ class NetworkTrainer:
             for t in target_text_encoder_conds:
                 t.requires_grad_(True)
 
+        #    target_noise_pred = noise
+        # -) data_noise_pred   = noise
+        # ==============================
+        #    target_noise_pred - data_noise_pred = 0
+        #    target_noise_pred = data_noise_pred
         with torch.no_grad(), accelerator.autocast():
             data_noise_pred = _call_unet(
                 noisy_data_latents.to(accelerator.device),
