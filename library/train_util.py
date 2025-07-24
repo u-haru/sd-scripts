@@ -1879,7 +1879,7 @@ class DreamBoothDataset(BaseDataset):
         validation_split: float,
         validation_seed: Optional[int],
         resize_interpolation: Optional[str],
-        addift_enabled: bool,
+        image_pair_training: bool,
     ) -> None:
         super().__init__(resolution, network_multiplier, debug_dataset, resize_interpolation)
 
@@ -2146,31 +2146,31 @@ class DreamBoothDataset(BaseDataset):
 
         self.num_reg_images = num_reg_images
 
-        self.addift_enabled = addift_enabled
-        if self.addift_enabled:
+        self.image_pair_training = image_pair_training
+        if self.image_pair_training:
             self.step_flippeds: dict[int, bool] = {}
-            from library.addift_util import ADDifTBucketManager
-            self.bucket_class = ADDifTBucketManager  # ADDifTの場合はADDifTBucketManagerを使う
-            self.batch_size *= 2  # ADDifTの場合はbatch_sizeを2倍にする (process_batch内で分割される)
+            from library.addift_util import PairBucketManager
+            self.bucket_class = PairBucketManager  # ペア学習の場合はADDifTBucketManagerを使う
+            self.batch_size *= 2  # ペア学習の場合はbatch_sizeを2倍にする (process_batch内で分割される)
 
     def __len__(self):
-        # ADDifTの場合は交替学習のためデータ数を2倍にする
-        if self.addift_enabled:
+        # ペア学習の場合は交替学習のためデータ数を2倍にする
+        if self.image_pair_training:
             return super().__len__() * 2
         return super().__len__()
 
     def __getitem__(self, index: int):
-        if self.addift_enabled:
+        if self.image_pair_training:
             return super().__getitem__(index//2)
         return super().__getitem__(index)
 
     def shuffle_buckets(self):
-        if self.addift_enabled:
+        if self.image_pair_training:
             self.step_flippeds.clear()  # clear flipped cache
         return super().shuffle_buckets()
 
     def flipped(self, index, image_info, subset) -> bool:
-        if self.addift_enabled:
+        if self.image_pair_training:
             if index in self.step_flippeds:
                 return self.step_flippeds[index]
             else:
@@ -4615,12 +4615,13 @@ def add_dataset_arguments(
         parser.add_argument(
             "--reg_data_dir", type=str, default=None, help="directory for regularization images / 正則化画像データのディレクトリ"
         )
-        # ADDifT arguments
         parser.add_argument(
-            "--addift_enabled",
-            action="store_true", 
-            help="Enable ADDifT (Alternating Direct Difference Training) mode / ADDifT（Alternating Direct Difference Training）モードを有効にする",
+            "--image_pair_training",
+            type=str, default=None,
+            choices=["addift"],
+            help="Enable pair training like ADDifT (Alternating Direct Difference Training) / ADDifTのような画像ペアの学習を有効にする"
         )
+        # ADDifT arguments
         parser.add_argument(
             "--addift_scale",
             type=float,

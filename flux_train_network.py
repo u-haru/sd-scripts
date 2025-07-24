@@ -480,10 +480,10 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 weight_dtype,
             )
             # apply model prediction type
-            latents_pred, _ = flux_train_utils.apply_model_prediction_type(args, latents_pred, _noisy_latents, _sigmas)
+            latents_pred, weighting = flux_train_utils.apply_model_prediction_type(args, latents_pred, _noisy_latents, _sigmas)
             if args.masked_loss or ("alpha_masks" in _batch and _batch["alpha_masks"] is not None):
                 latents_pred = apply_masked_loss(latents_pred, _batch)
-            return latents_pred
+            return latents_pred, weighting
 
         first = (self.current_step % 2) == 0
 
@@ -517,25 +517,27 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         #    target_noise_pred - data_noise_pred = data_latents    - target_latents
         #    target_noise_pred + target_latents  = data_noise_pred + data_latents
         with torch.no_grad(), accelerator.autocast():
-            data_noise_pred = (_call_unet(
+            data_noise_pred, _ = _call_unet(
                 noisy_data_latents.to(accelerator.device),
                 addift_timesteps,
                 data_text_encoder_conds,
                 data_batch,
                 sigmas,
-            ) + data_latents).detach()
+            )
+            data_noise_pred = (data_noise_pred + data_latents).detach()
         network.set_enabled(True)
         network.set_multiplier(args.addift_scale if first else -args.addift_scale * args.addift_diff_ratio)
         with accelerator.autocast():
-            target_noise_pred = _call_unet(
+            target_noise_pred, target_weighting = _call_unet(
                 noisy_target_latents.to(accelerator.device).requires_grad_(train_unet),
                 addift_timesteps,
                 target_text_encoder_conds,
                 target_batch,
                 sigmas,
-            ) + target_latents
+            )
+            target_noise_pred = target_noise_pred + target_latents
 
-        return data_noise_pred, target_noise_pred, addift_timesteps
+        return data_noise_pred, target_noise_pred, addift_timesteps, target_weighting
 
     def post_process_loss(self, loss, args, timesteps, noise_scheduler):
         return loss

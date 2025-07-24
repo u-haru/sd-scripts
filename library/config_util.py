@@ -118,7 +118,7 @@ class DreamBoothDatasetParams(BaseDatasetParams):
     bucket_reso_steps: int = 64
     bucket_no_upscale: bool = False
     prior_loss_weight: float = 1.0
-    addift_enabled: bool = False
+    image_pair_training: bool = False
     
 @dataclass
 class FineTuningDatasetParams(BaseDatasetParams):
@@ -218,7 +218,7 @@ class ConfigSanitizer:
         "alpha_mask": bool,
     }
     DB_DATASET_DISTINCT_SCHEMA = {
-        "addift_enabled": bool,
+        "image_pair_training": bool,
     }
     # FT means FineTuning
     FT_SUBSET_DISTINCT_SCHEMA = {

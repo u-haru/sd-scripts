@@ -437,7 +437,44 @@ class NetworkTrainer:
                 target_batch,
             )
 
-        return data_noise_pred, target_noise_pred, self.addift_timesteps
+        return data_noise_pred, target_noise_pred, self.addift_timesteps, None
+
+    def image_pair_process_batch(
+        self,
+        args,
+        accelerator,
+        noise_scheduler,
+        data_batch,
+        target_batch,
+        data_latents,
+        target_latents,
+        data_text_encoder_conds,
+        target_text_encoder_conds,
+        unet,
+        network,
+        weight_dtype,
+        train_unet,
+        is_train=True,
+    ):
+        if args.image_pair_training == "addift":
+            noise_pred, target, timesteps, weighting = self.addift_process_batch(
+                data_batch,
+                target_batch,
+                data_latents,
+                target_latents.to(accelerator.device),
+                data_text_encoder_conds,
+                target_text_encoder_conds,
+                unet,
+                network,
+                noise_scheduler,
+                weight_dtype,
+                accelerator,
+                args,
+                train_unet=train_unet,
+            )
+        else:
+            raise ValueError(f"Unknown image pair training mode: {args.image_pair_training}")
+        return noise_pred, target, timesteps, weighting
 
     def process_batch(
         self,
@@ -522,15 +559,17 @@ class NetworkTrainer:
                     if encoded_text_encoder_conds[i] is not None:
                         text_encoder_conds[i] = encoded_text_encoder_conds[i]
 
-        # ADDifTを使う場合
-        if args.addift_enabled:
+        # ペア学習を使う場合
+        if args.image_pair_training:
             data_batch, target_batch = split_batch_data_target(batch)
             data_latents = latents[0:-1:2]
             target_latents = latents[1::2]
             data_text_encoder_conds = [c[0:-1:2] for c in text_encoder_conds]
             target_text_encoder_conds = [c[1::2] for c in text_encoder_conds]
-
-            data_noise_pred, target_noise_pred, addift_timesteps = self.addift_process_batch(
+            noise_pred, target, timesteps, weighting = self.image_pair_process_batch(
+                args,
+                accelerator,
+                noise_scheduler,
                 data_batch,
                 target_batch,
                 data_latents,
@@ -539,18 +578,18 @@ class NetworkTrainer:
                 target_text_encoder_conds,
                 unet,
                 network,
-                noise_scheduler,
                 weight_dtype,
-                accelerator,
-                args,
-                train_unet=train_unet,
+                train_unet,
+                is_train,
             )
 
-            huber_c = train_util.get_huber_threshold_if_needed(args, addift_timesteps, noise_scheduler)
-            loss = train_util.conditional_loss(target_noise_pred.float(), data_noise_pred.float(), args.loss_type, "none", huber_c).to(target_latents.device)
+            huber_c = train_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+            loss = train_util.conditional_loss(target.float(), noise_pred.float(), args.loss_type, "none", huber_c).to(target_latents.device)
+            if weighting is not None:
+                loss = loss * weighting
             loss = loss.mean([1, 2, 3])
             loss = loss * data_batch["loss_weights"] * target_batch["loss_weights"]
-            loss = self.post_process_loss(loss, args, addift_timesteps, noise_scheduler)
+            loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
             return loss.mean()
 
         # sample noise, call unet, get target
@@ -868,7 +907,7 @@ class NetworkTrainer:
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset_group,
             batch_size=1,
-            shuffle=not args.addift_enabled,
+            shuffle=not args.image_pair_training,
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
@@ -1306,10 +1345,13 @@ class NetworkTrainer:
                 vae_name = os.path.basename(vae_name)
             metadata["ss_vae_name"] = vae_name
 
-        if args.addift_enabled:
-            metadata["ss_addift_enabled"] = args.addift_enabled
-            metadata["ss_addift_scale"] = args.addift_scale
-            metadata["ss_addift_diff_ratio"] = args.addift_diff_ratio
+        if args.image_pair_training:
+            image_pair_training_dict = {}
+            if args.image_pair_training == "addift":
+                image_pair_training_dict["addift_enabled"] = True
+                image_pair_training_dict["addift_scale"] = args.addift_scale
+                image_pair_training_dict["addift_diff_ratio"] = args.addift_diff_ratio
+            metadata["ss_image_pair_training"] = image_pair_training_dict
 
         metadata = {k: str(v) for k, v in metadata.items()}
 

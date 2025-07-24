@@ -28,7 +28,7 @@ def map_addift_range(range_min: float, range_max: float, num_segments: int, max_
     end = min(start + segment_size, range_max)
     return x * ((end - start) / max_timesteps) + start
 
-class ADDifTBucketManager(train_util.BucketManager):
+class PairBucketManager(train_util.BucketManager):
     def __init__(self, no_upscale, max_reso, min_size, max_size, reso_steps):
         super().__init__(no_upscale, max_reso, min_size, max_size, reso_steps)
         self.filename_base_to_reso = {}
