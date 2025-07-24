@@ -2155,6 +2155,7 @@ class DreamBoothDataset(BaseDataset):
 
     def __len__(self):
         # ペア学習の場合は交替学習のためデータ数を2倍にする
+        # ADDifT以外では意味ないけど、共通化のためにそのまま
         if self.image_pair_training:
             return super().__len__() * 2
         return super().__len__()
@@ -4618,8 +4619,8 @@ def add_dataset_arguments(
         parser.add_argument(
             "--image_pair_training",
             type=str, default=None,
-            choices=["addift"],
-            help="Enable pair training like ADDifT (Alternating Direct Difference Training) / ADDifTのような画像ペアの学習を有効にする"
+            choices=["kontext", "addift"],
+            help="Enable pair training like Kontext or ADDifT (Alternating Direct Difference Training) - Kontext is implemented only in Flux / KontextやADDifTのような画像ペアの学習を有効にする - KontextはFluxでのみ実装"
         )
         # ADDifT arguments
         parser.add_argument(

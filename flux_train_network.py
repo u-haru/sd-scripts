@@ -287,6 +287,15 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         packed_noisy_model_input = flux_utils.pack_latents(noisy_latents)  # b, c, h*2, w*2 -> b, h*w, c*4
         packed_latent_height, packed_latent_width = noisy_latents.shape[2] // 2, noisy_latents.shape[3] // 2
         img_ids = flux_utils.prepare_img_ids(bsz, packed_latent_height, packed_latent_width).to(device=accelerator.device)
+        orig_inp_shape = packed_noisy_model_input.shape
+        if "cond_latents" in batch:
+            packed_cond_input = flux_utils.pack_latents(
+                batch["cond_latents"],
+            )
+            packed_noisy_model_input = torch.cat([packed_noisy_model_input, packed_cond_input], dim=1)
+            cond_latents_ids = flux_utils.prepare_img_ids(bsz, packed_latent_height, packed_latent_width).to(device=accelerator.device)
+            cond_latents_ids[..., 0] = 1
+            img_ids = torch.cat([img_ids, cond_latents_ids], dim=1)
 
         # get guidance
         # ensure guidance_scale in args is float
@@ -326,6 +335,9 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
             guidance=guidance_vec,
             txt_attention_mask=t5_attn_mask,
         )
+        if "cond_latents" in batch:
+            noise_pred = noise_pred[:, : orig_inp_shape[1]]
+
         noise_pred = flux_utils.unpack_latents(noise_pred, packed_latent_height, packed_latent_width)
         return noise_pred
 

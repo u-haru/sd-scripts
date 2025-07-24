@@ -472,6 +472,23 @@ class NetworkTrainer:
                 args,
                 train_unet=train_unet,
             )
+        elif args.image_pair_training == "kontext":
+            # Kontextのペア学習
+            target_batch["cond_latents"] = data_latents
+            target_batch["cond_latents_ids"] = data_text_encoder_conds
+            noise_pred, target, timesteps, weighting = self.get_noise_pred_and_target(
+                args,
+                accelerator,
+                noise_scheduler,
+                target_latents.to(accelerator.device),
+                target_batch,
+                target_text_encoder_conds,
+                unet,
+                network,
+                weight_dtype,
+                train_unet,
+                is_train=is_train,
+            )
         else:
             raise ValueError(f"Unknown image pair training mode: {args.image_pair_training}")
         return noise_pred, target, timesteps, weighting
@@ -1351,6 +1368,8 @@ class NetworkTrainer:
                 image_pair_training_dict["addift_enabled"] = True
                 image_pair_training_dict["addift_scale"] = args.addift_scale
                 image_pair_training_dict["addift_diff_ratio"] = args.addift_diff_ratio
+            elif args.image_pair_training == "kontext":
+                image_pair_training_dict["kontext_enabled"] = True
             metadata["ss_image_pair_training"] = image_pair_training_dict
 
         metadata = {k: str(v) for k, v in metadata.items()}
