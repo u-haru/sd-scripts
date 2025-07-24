@@ -467,7 +467,6 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         accelerator,
         args,
         train_unet=True,
-        first=False,
     ):
         def _call_unet(_noisy_latents, _timesteps, _text_encoder_conds, _batch, _sigmas):
             latents_pred = self.call_unet(
@@ -486,6 +485,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 latents_pred = apply_masked_loss(latents_pred, _batch)
             return latents_pred
 
+        first = (self.current_step % 2) == 0
 
         if first:
             min_t = 0 if args.min_timestep is None else args.min_timestep
@@ -496,6 +496,9 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
             sigmas = map_addift_range(min_t/noise_scheduler.config.num_train_timesteps, max_t/noise_scheduler.config.num_train_timesteps, args.addift_timesteps_segments, 1, self.current_step//2, sigmas)
             addift_timesteps = map_addift_range(min_t, max_t, args.addift_timesteps_segments, noise_scheduler.config.num_train_timesteps, self.current_step//2, addift_timesteps)
             self.addift_timesteps = (addift_timesteps, sigmas)
+        else:
+            data_latents, target_latents = target_latents, data_latents
+            data_batch, target_batch = target_batch, data_batch
         addift_timesteps, sigmas = self.addift_timesteps
 
         noise = torch.randn_like(data_latents)

@@ -380,7 +380,6 @@ class NetworkTrainer:
         accelerator,
         args,
         train_unet=True,
-        first=False,
     ):
         def _call_unet(_noisy_latents, _timesteps, _text_encoder_conds, _batch):
             latents_pred = self.call_unet(
@@ -396,11 +395,14 @@ class NetworkTrainer:
             if args.masked_loss or ("alpha_masks" in _batch and _batch["alpha_masks"] is not None):
                 latents_pred = apply_masked_loss(latents_pred, _batch)
             return latents_pred
-
+        first = (self.current_step % 2) == 0
         if first:
             min_t = 0 if args.min_timestep is None else args.min_timestep
             max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
             self.addift_timesteps = get_addift_timesteps(min_t, max_t, args.addift_timesteps_segments, self.current_step//2, data_latents.shape[0]).to(data_latents.device)
+        else:
+            data_latents, target_latents = target_latents, data_latents
+            data_batch, target_batch = target_batch, data_batch
 
         noise, noisy_data_latents, _ = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, data_latents, self.addift_timesteps)
         _, noisy_target_latents, _ = train_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, target_latents, self.addift_timesteps, noise)
@@ -522,17 +524,11 @@ class NetworkTrainer:
 
         # ADDifTを使う場合
         if args.addift_enabled:
-            first = (self.current_step % 2) == 0
-
             data_batch, target_batch = split_batch_data_target(batch)
             data_latents = latents[0:-1:2]
             target_latents = latents[1::2]
             data_text_encoder_conds = [c[0:-1:2] for c in text_encoder_conds]
             target_text_encoder_conds = [c[1::2] for c in text_encoder_conds]
-
-            if not first:
-                data_latents, target_latents = target_latents, data_latents
-                data_batch, target_batch = target_batch, data_batch
 
             data_noise_pred, target_noise_pred, addift_timesteps = self.addift_process_batch(
                 data_batch,
@@ -548,7 +544,6 @@ class NetworkTrainer:
                 accelerator,
                 args,
                 train_unet=train_unet,
-                first=first,
             )
 
             huber_c = train_util.get_huber_threshold_if_needed(args, addift_timesteps, noise_scheduler)
