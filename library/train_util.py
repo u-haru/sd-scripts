@@ -4641,6 +4641,11 @@ def add_dataset_arguments(
             default=5,
             help="Number of segments to divide timestep range into (default: 5) / タイムステップ範囲を分割するセグメント数（デフォルト: 5）",
         )
+        parser.add_argument(
+            "--addift_no_flip",
+            action="store_true",
+            help="Disable flipping for ADDifT / ADDifTの反転学習を無効にする",
+        )
 
     if support_caption:
         # caption dataset

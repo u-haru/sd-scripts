@@ -497,7 +497,7 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
                 latents_pred = apply_masked_loss(latents_pred, _batch)
             return latents_pred, weighting
 
-        first = (self.current_step % 2) == 0
+        first = ((self.current_step % 2) == 0) or args.addift_no_flip
 
         if first:
             min_t = 0 if args.min_timestep is None else args.min_timestep

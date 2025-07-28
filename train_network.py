@@ -395,7 +395,7 @@ class NetworkTrainer:
             if args.masked_loss or ("alpha_masks" in _batch and _batch["alpha_masks"] is not None):
                 latents_pred = apply_masked_loss(latents_pred, _batch)
             return latents_pred
-        first = (self.current_step % 2) == 0
+        first = ((self.current_step % 2) == 0) or args.addift_no_flip
         if first:
             min_t = 0 if args.min_timestep is None else args.min_timestep
             max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
@@ -1368,6 +1368,8 @@ class NetworkTrainer:
                 image_pair_training_dict["addift_enabled"] = True
                 image_pair_training_dict["addift_scale"] = args.addift_scale
                 image_pair_training_dict["addift_diff_ratio"] = args.addift_diff_ratio
+                image_pair_training_dict["addift_timesteps_segments"] = args.addift_timesteps_segments
+                image_pair_training_dict["addift_no_flip"] = args.addift_no_flip
             elif args.image_pair_training == "kontext":
                 image_pair_training_dict["kontext_enabled"] = True
             metadata["ss_image_pair_training"] = image_pair_training_dict
