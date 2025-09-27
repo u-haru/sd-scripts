@@ -1371,7 +1371,7 @@ class NetworkTrainer:
                 image_pair_training_dict["addift_no_flip"] = args.addift_no_flip
             elif args.image_pair_training == "kontext":
                 image_pair_training_dict["kontext_enabled"] = True
-            metadata["ss_image_pair_training"] = image_pair_training_dict
+            metadata["ss_image_pair_training"] = json.dumps(image_pair_training_dict)
 
         metadata = {k: str(v) for k, v in metadata.items()}
 
