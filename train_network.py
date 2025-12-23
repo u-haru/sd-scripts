@@ -396,8 +396,9 @@ class NetworkTrainer:
                 _batch,
                 weight_dtype,
             )
-            if args.masked_loss or ("alpha_masks" in _batch and _batch["alpha_masks"] is not None):
-                latents_pred = apply_masked_loss(latents_pred, _batch)
+            # alphaが被ってないところがnoiseだらけになるので使わない
+            # if args.masked_loss or ("alpha_masks" in _batch and _batch["alpha_masks"] is not None):
+            #     latents_pred = apply_masked_loss(latents_pred, _batch)
             return latents_pred
         first = ((self.current_step % 2) == 0) or args.addift_no_flip
         if first:
