@@ -512,7 +512,7 @@ def get_sigma_and_timesteps(
         sigmas = get_sigmas(noise_scheduler, timesteps, device, n_dim=latents.ndim, dtype=dtype)
 
     # Broadcast sigmas to latent shape
-    sigmas = sigmas.view(-1, 1, 1, 1)
+    sigmas = sigmas.view(-1, 1, 1, 1) if latents.ndim == 4 else sigmas.view(-1, 1, 1, 1, 1)
     return sigmas, timesteps
 
 def get_noisy_model_input_and_timesteps(
