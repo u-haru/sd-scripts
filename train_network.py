@@ -368,21 +368,6 @@ class NetworkTrainer:
         args,
         train_unet=True,
     ):
-        def _call_unet(_noisy_latents, _timesteps, _text_encoder_conds, _batch):
-            latents_pred = self.call_unet(
-                args,
-                accelerator,
-                unet,
-                _noisy_latents,
-                _timesteps,
-                _text_encoder_conds,
-                _batch,
-                weight_dtype,
-            )
-            # alphaが被ってないところがnoiseだらけになるので使わない
-            # if args.masked_loss or ("alpha_masks" in _batch and _batch["alpha_masks"] is not None):
-            #     latents_pred = apply_masked_loss(latents_pred, _batch)
-            return latents_pred
         first = ((self.current_step % 2) == 0) or args.addift_no_flip
         if first:
             min_t = 0 if args.min_timestep is None else args.min_timestep
@@ -410,20 +395,28 @@ class NetworkTrainer:
         #    target_noise_pred - data_noise_pred = 0
         #    target_noise_pred = data_noise_pred
         with torch.no_grad(), accelerator.autocast():
-            data_noise_pred = _call_unet(
-                noisy_data_latents.to(accelerator.device),
+            data_noise_pred = self.call_unet(
+                args,
+                accelerator,
+                unet,
+                noisy_data_latents,
                 self.addift_timesteps,
                 data_text_encoder_conds,
                 data_batch,
+                weight_dtype,
             ).detach()
         network.set_enabled(True)
         network.set_multiplier(args.addift_scale if first else -args.addift_scale * args.addift_diff_ratio)
         with accelerator.autocast():
-            target_noise_pred = _call_unet(
-                noisy_target_latents.to(accelerator.device).requires_grad_(train_unet),
+            target_noise_pred = self.call_unet(
+                args,
+                accelerator,
+                unet,
+                noisy_target_latents.requires_grad_(train_unet),
                 self.addift_timesteps,
                 target_text_encoder_conds,
                 target_batch,
+                weight_dtype,
             )
 
         return data_noise_pred, target_noise_pred, self.addift_timesteps, None
@@ -450,7 +443,7 @@ class NetworkTrainer:
                 data_batch,
                 target_batch,
                 data_latents,
-                target_latents.to(accelerator.device),
+                target_latents.to(device=accelerator.device, non_blocking=True),
                 data_text_encoder_conds,
                 target_text_encoder_conds,
                 unet,
@@ -469,7 +462,7 @@ class NetworkTrainer:
                 args,
                 accelerator,
                 noise_scheduler,
-                target_latents.to(accelerator.device),
+                target_latents.to(device=accelerator.device, non_blocking=True),
                 target_batch,
                 target_text_encoder_conds,
                 unet,
@@ -509,7 +502,7 @@ class NetworkTrainer:
             else:
                 # latentに変換
                 if args.vae_batch_size is None or len(batch["images"]) <= args.vae_batch_size:
-                    latents = self.encode_images_to_latents(args, vae, batch["images"].to(accelerator.device, dtype=vae_dtype))
+                    latents = self.encode_images_to_latents(args, vae, batch["images"].to(device=accelerator.device, dtype=vae_dtype, non_blocking=True))
                 else:
                     chunks = [
                         batch["images"][i : i + args.vae_batch_size] for i in range(0, len(batch["images"]), args.vae_batch_size)
@@ -517,7 +510,7 @@ class NetworkTrainer:
                     list_latents = []
                     for chunk in chunks:
                         with torch.no_grad():
-                            chunk = self.encode_images_to_latents(args, vae, chunk.to(accelerator.device, dtype=vae_dtype))
+                            chunk = self.encode_images_to_latents(args, vae, chunk.to(device=accelerator.device, dtype=vae_dtype, non_blocking=True))
                             list_latents.append(chunk)
                     latents = torch.cat(list_latents, dim=0)
 
@@ -602,7 +595,7 @@ class NetworkTrainer:
             args,
             accelerator,
             noise_scheduler,
-            latents.to(accelerator.device),
+            latents.to(device=accelerator.device, non_blocking=True),
             batch,
             text_encoder_conds,
             unet,

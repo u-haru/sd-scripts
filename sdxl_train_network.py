@@ -142,8 +142,8 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
                 #         clip_skip=args.clip_skip,
                 #     )
                 # else:
-                input_ids1 = input_ids1.to(accelerator.device)
-                input_ids2 = input_ids2.to(accelerator.device)
+                input_ids1 = input_ids1.to(device=accelerator.device, non_blocking=True)
+                input_ids2 = input_ids2.to(device=accelerator.device, non_blocking=True)
                 encoder_hidden_states1, encoder_hidden_states2, pool2 = train_util.get_hidden_states_sdxl(
                     args.max_token_length,
                     input_ids1,
@@ -156,9 +156,9 @@ class SdxlNetworkTrainer(train_network.NetworkTrainer):
                     accelerator=accelerator,
                 )
         else:
-            encoder_hidden_states1 = batch["text_encoder_outputs1_list"].to(accelerator.device).to(weight_dtype)
-            encoder_hidden_states2 = batch["text_encoder_outputs2_list"].to(accelerator.device).to(weight_dtype)
-            pool2 = batch["text_encoder_pool2_list"].to(accelerator.device).to(weight_dtype)
+            encoder_hidden_states1 = batch["text_encoder_outputs1_list"].to(device=accelerator.device, dtype=weight_dtype, non_blocking=True)
+            encoder_hidden_states2 = batch["text_encoder_outputs2_list"].to(device=accelerator.device, dtype=weight_dtype, non_blocking=True)
+            pool2 = batch["text_encoder_pool2_list"].to(device=accelerator.device, dtype=weight_dtype, non_blocking=True)
 
             # # verify that the text encoder outputs are correct
             # ehs1, ehs2, p2 = train_util.get_hidden_states_sdxl(
