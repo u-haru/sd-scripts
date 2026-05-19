@@ -21,6 +21,7 @@ from library import (
     strategy_base,
     train_util,
 )
+from library.addift_util import map_addift_range
 import train_network
 from library.utils import setup_logging
 
@@ -323,6 +324,131 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
         weighting = anima_train_utils.compute_loss_weighting_for_anima(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
 
         return model_pred, target, timesteps, weighting
+
+    def addift_process_batch(
+        self,
+        data_batch,
+        target_batch,
+        data_latents,
+        target_latents,
+        data_text_encoder_conds,
+        target_text_encoder_conds,
+        unet,
+        network,
+        noise_scheduler,
+        weight_dtype,
+        accelerator,
+        args,
+        train_unet=True,
+    ):
+        def _call_anima(_noisy_latents, _timesteps, _text_encoder_conds, _is_train):
+            prompt_embeds, attn_mask, t5_input_ids, t5_attn_mask = _text_encoder_conds[:4]
+
+            prompt_embeds = prompt_embeds.to(accelerator.device, dtype=weight_dtype)
+            attn_mask = attn_mask.to(accelerator.device)
+            t5_input_ids = t5_input_ids.to(accelerator.device, dtype=torch.long)
+            t5_attn_mask = t5_attn_mask.to(accelerator.device)
+
+            bs = _noisy_latents.shape[0]
+            h_latent = _noisy_latents.shape[-2]
+            w_latent = _noisy_latents.shape[-1]
+            padding_mask = torch.zeros(bs, 1, h_latent, w_latent, dtype=weight_dtype, device=accelerator.device)
+
+            _timesteps = _timesteps.to(device=accelerator.device, dtype=weight_dtype) / 1000.0
+            _noisy_latents = _noisy_latents.unsqueeze(2)
+            with torch.set_grad_enabled(_is_train), accelerator.autocast():
+                model_pred = unet(
+                    _noisy_latents,
+                    _timesteps,
+                    prompt_embeds,
+                    padding_mask=padding_mask,
+                    target_input_ids=t5_input_ids,
+                    target_attention_mask=t5_attn_mask,
+                    source_attention_mask=attn_mask,
+                )
+            return model_pred.squeeze(2)
+
+        first = ((self.current_step % 2) == 0) or args.addift_no_flip
+        if first:
+            min_t = 0 if args.min_timestep is None else args.min_timestep
+            max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+            latents_for_timesteps = data_latents.squeeze(2) if data_latents.ndim == 5 else data_latents
+            sigmas, addift_timesteps = flux_train_utils.get_sigma_and_timesteps(
+                args, noise_scheduler, latents_for_timesteps, accelerator.device, weight_dtype
+            )
+            current_step = self.current_step if args.addift_no_flip else self.current_step // 2
+            sigmas = map_addift_range(
+                min_t / noise_scheduler.config.num_train_timesteps,
+                max_t / noise_scheduler.config.num_train_timesteps,
+                args.addift_timesteps_segments,
+                1,
+                current_step,
+                sigmas,
+            )
+            addift_timesteps = map_addift_range(
+                min_t,
+                max_t,
+                args.addift_timesteps_segments,
+                noise_scheduler.config.num_train_timesteps,
+                current_step,
+                addift_timesteps,
+            )
+            self.addift_timesteps = (addift_timesteps, sigmas)
+        else:
+            data_latents, target_latents = target_latents, data_latents
+            data_batch, target_batch = target_batch, data_batch
+        addift_timesteps, sigmas = self.addift_timesteps
+
+        if data_latents.ndim == 5:
+            data_latents = data_latents.squeeze(2)
+        if target_latents.ndim == 5:
+            target_latents = target_latents.squeeze(2)
+        data_latents = data_latents.to(device=accelerator.device, dtype=weight_dtype, non_blocking=True)
+        target_latents = target_latents.to(device=accelerator.device, dtype=weight_dtype, non_blocking=True)
+
+        noise = torch.randn_like(data_latents)
+        noisy_data_latents, _, _ = flux_train_utils.get_noisy_model_input_and_timesteps(
+            args, noise_scheduler, data_latents, noise, accelerator.device, weight_dtype, timesteps=addift_timesteps, sigmas=sigmas
+        )
+        noisy_target_latents, _, _ = flux_train_utils.get_noisy_model_input_and_timesteps(
+            args, noise_scheduler, target_latents, noise, accelerator.device, weight_dtype, timesteps=addift_timesteps, sigmas=sigmas
+        )
+
+        network.set_enabled(False)
+
+        if args.gradient_checkpointing:
+            noisy_target_latents.requires_grad_(True)
+            for t in target_text_encoder_conds:
+                if t is not None and t.dtype.is_floating_point:
+                    t.requires_grad_(True)
+
+        #    target_noise_pred = noise - target_latents
+        # -) data_noise_pred   = noise - data_latents
+        # ===============================================
+        #    target_noise_pred + target_latents = data_noise_pred + data_latents
+        with torch.no_grad(), accelerator.autocast():
+            data_noise_pred = _call_anima(
+                noisy_data_latents.to(accelerator.device),
+                addift_timesteps,
+                data_text_encoder_conds,
+                False,
+            )
+            data_noise_pred = (data_noise_pred + data_latents.to(device=data_noise_pred.device, dtype=data_noise_pred.dtype)).detach()
+
+        network.set_enabled(True)
+        network.set_multiplier(args.addift_scale if first else -args.addift_scale * args.addift_diff_ratio)
+        with accelerator.autocast():
+            target_noise_pred = _call_anima(
+                noisy_target_latents.to(accelerator.device).requires_grad_(train_unet),
+                addift_timesteps,
+                target_text_encoder_conds,
+                True,
+            )
+            target_latents = target_latents.to(device=target_noise_pred.device, dtype=target_noise_pred.dtype)
+            target_noise_pred = target_noise_pred + target_latents
+            target_weighting = anima_train_utils.compute_loss_weighting_for_anima(weighting_scheme=args.weighting_scheme, sigmas=sigmas)
+
+        return data_noise_pred, target_noise_pred, addift_timesteps, target_weighting
 
     def process_batch(
         self,

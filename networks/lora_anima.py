@@ -69,6 +69,7 @@ class LoRAModule(torch.nn.Module):
         self.dropout = dropout
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
+        self.enabled = True
 
     def apply_to(self):
         self.org_forward = self.org_module.forward
@@ -78,6 +79,8 @@ class LoRAModule(torch.nn.Module):
 
     def forward(self, x):
         org_forwarded = self.org_forward(x)
+        if not self.enabled:
+            return org_forwarded
 
         # module dropout
         if self.module_dropout is not None and self.training:
