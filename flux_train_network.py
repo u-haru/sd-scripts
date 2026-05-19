@@ -556,8 +556,9 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
             sigmas, addift_timesteps = flux_train_utils.get_sigma_and_timesteps(
                 args, noise_scheduler, data_latents, accelerator.device, weight_dtype
             )
-            sigmas = map_addift_range(min_t/noise_scheduler.config.num_train_timesteps, max_t/noise_scheduler.config.num_train_timesteps, args.addift_timesteps_segments, 1, self.current_step//2, sigmas)
-            addift_timesteps = map_addift_range(min_t, max_t, args.addift_timesteps_segments, noise_scheduler.config.num_train_timesteps, self.current_step//2, addift_timesteps)
+            current_step = self.current_step if args.addift_no_flip else self.current_step // 2
+            sigmas = map_addift_range(min_t/noise_scheduler.config.num_train_timesteps, max_t/noise_scheduler.config.num_train_timesteps, args.addift_timesteps_segments, 1, current_step, sigmas)
+            addift_timesteps = map_addift_range(min_t, max_t, args.addift_timesteps_segments, noise_scheduler.config.num_train_timesteps, current_step, addift_timesteps)
             self.addift_timesteps = (addift_timesteps, sigmas)
         else:
             data_latents, target_latents = target_latents, data_latents
