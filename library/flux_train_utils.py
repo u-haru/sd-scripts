@@ -469,10 +469,10 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
     return weighting
 
 
-def get_noisy_model_input_and_timesteps(
-    args, noise_scheduler, latents: torch.Tensor, noise: torch.Tensor, device, dtype
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    bsz, h, w = latents.shape[0], latents.shape[-2], latents.shape[-1]
+def get_sigma_and_timesteps(
+    args, noise_scheduler, latents: torch.Tensor, device, dtype,
+):
+    bsz, _, h, w = latents.shape
     assert bsz > 0, "Batch size not large enough"
     num_timesteps = noise_scheduler.config.num_train_timesteps
     if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
@@ -514,6 +514,21 @@ def get_noisy_model_input_and_timesteps(
 
     # Broadcast sigmas to latent shape
     sigmas = sigmas.view(-1, 1, 1, 1) if latents.ndim == 4 else sigmas.view(-1, 1, 1, 1, 1)
+    return sigmas, timesteps
+
+def get_noisy_model_input_and_timesteps(
+    args,
+    noise_scheduler,
+    latents: torch.Tensor,
+    noise: torch.Tensor,
+    device,
+    dtype,
+    timesteps: Optional[torch.IntTensor] = None,
+    sigmas: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.IntTensor, torch.Tensor]:
+    if timesteps is None or sigmas is None:
+        # Get random timesteps and sigmas
+        sigmas, timesteps = get_sigma_and_timesteps(args, noise_scheduler, latents, device, dtype)
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
