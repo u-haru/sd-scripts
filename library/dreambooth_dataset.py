@@ -51,6 +51,7 @@ class DreamBoothDataset(BaseDataset):
         validation_split: float,
         validation_seed: Optional[int],
         resize_interpolation: Optional[str],
+        image_pair_training: bool,
         skip_image_resolution: Optional[Tuple[int, int]] = None,
     ) -> None:
         super().__init__(
@@ -344,3 +345,37 @@ class DreamBoothDataset(BaseDataset):
                 first_loop = False
 
         self.num_reg_images = num_reg_images
+
+        self.image_pair_training = image_pair_training
+        if self.image_pair_training:
+            self.step_flippeds: dict[int, bool] = {}
+            from library.addift_util import PairBucketManager
+            self.bucket_class = PairBucketManager  # ペア学習の場合はADDifTBucketManagerを使う
+            self.batch_size *= 2  # ペア学習の場合はbatch_sizeを2倍にする (process_batch内で分割される)
+
+    def __len__(self):
+        # ペア学習の場合は交替学習のためデータ数を2倍にする
+        # ADDifT以外では意味ないけど、共通化のためにそのまま
+        if self.image_pair_training:
+            return super().__len__() * 2
+        return super().__len__()
+
+    def __getitem__(self, index: int):
+        if self.image_pair_training:
+            return super().__getitem__(index//2)
+        return super().__getitem__(index)
+
+    def shuffle_buckets(self):
+        if self.image_pair_training:
+            self.step_flippeds.clear()  # clear flipped cache
+        return super().shuffle_buckets()
+
+    def flipped(self, index, image_info, subset) -> bool:
+        if self.image_pair_training:
+            if index in self.step_flippeds:
+                return self.step_flippeds[index]
+            else:
+                flipped = super().flipped(index, image_info, subset)
+                self.step_flippeds[index] = flipped
+                return flipped
+        return super().flipped(index, image_info, subset)

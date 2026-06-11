@@ -81,6 +81,7 @@ class LoRAModule(torch.nn.Module):
         self.dropout = dropout
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
+        self.enabled = True
 
     def apply_to(self):
         self.org_forward = self.org_module.forward
@@ -89,6 +90,8 @@ class LoRAModule(torch.nn.Module):
 
     def forward(self, x):
         org_forwarded = self.org_forward(x)
+        if not self.enabled:
+            return org_forwarded
 
         # module dropout
         if self.module_dropout is not None and self.training:
@@ -166,7 +169,7 @@ class LoRAInfModule(LoRAModule):
 
         # extract weight from org_module
         org_sd = self.org_module.state_dict()
-        weight = org_sd["weight"].to(torch.float)
+        weight = org_sd["weight"].to(torch.float).to(device)
 
         # merge weight
         if len(weight.size()) == 2:

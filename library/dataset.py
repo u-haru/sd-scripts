@@ -32,7 +32,7 @@ import pathlib
 import random
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Type, Union
 
 import cv2
 import imagesize
@@ -179,7 +179,7 @@ class ImageInfo:
 
 
 class BucketManager:
-    def __init__(self, no_upscale, max_reso, min_size, max_size, reso_steps) -> None:
+    def __init__(self, no_upscale: bool, max_reso: tuple[int, int], min_size: int|None, max_size: int|None, reso_steps: int|None) -> None:
         if max_size is not None:
             if max_reso is not None:
                 assert max_size >= max_reso[0], "the max_size should be larger than the width of max_reso"
@@ -198,11 +198,11 @@ class BucketManager:
         self.max_size = max_size
         self.reso_steps = reso_steps
 
-        self.resos = []
-        self.reso_to_id = {}
-        self.buckets = []  # 前処理時は (image_key, image, original size, crop left/top)、学習時は image_key
+        self.resos: list[tuple[int, int]] = []
+        self.reso_to_id: dict[tuple[int, int], int] = {}
+        self.buckets: list[list[Union[str, ImageInfo]]] = []  # 前処理時はImageInfo、学習時は image_key
 
-    def add_image(self, reso, image_or_info):
+    def add_image(self, reso, image_or_info: Union[str, ImageInfo]):
         bucket_id = self.reso_to_id[reso]
         self.buckets[bucket_id].append(image_or_info)
 
@@ -248,7 +248,7 @@ class BucketManager:
         x = int(x + 0.5)
         return x - x % self.reso_steps
 
-    def select_bucket(self, image_width, image_height):
+    def select_bucket(self, image_width, image_height, image_info: Optional[ImageInfo] = None):
         aspect_ratio = image_width / image_height
         if not self.no_upscale:
             # 拡大および縮小を行う
@@ -384,6 +384,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.token_strings = None
 
         self.enable_bucket = False
+        self.bucket_class: Type[BucketManager] = BucketManager
         self.bucket_manager: BucketManager = None  # not initialized
         self.min_bucket_reso = None
         self.max_bucket_reso = None
@@ -650,7 +651,7 @@ class BaseDataset(torch.utils.data.Dataset):
         # bucketを作成し、画像をbucketに振り分ける
         if self.enable_bucket:
             if self.bucket_manager is None:  # fine tuningの場合でmetadataに定義がある場合は、すでに初期化済み
-                self.bucket_manager = BucketManager(
+                self.bucket_manager = self.bucket_class(
                     self.bucket_no_upscale,
                     (self.width, self.height),
                     self.min_bucket_reso,
@@ -668,7 +669,7 @@ class BaseDataset(torch.utils.data.Dataset):
             for image_info in self.image_data.values():
                 image_width, image_height = image_info.image_size
                 image_info.bucket_reso, image_info.resized_size, ar_error = self.bucket_manager.select_bucket(
-                    image_width, image_height
+                    image_width, image_height, image_info
                 )
 
                 # logger.info(image_info.image_key, image_info.bucket_reso)
@@ -676,11 +677,11 @@ class BaseDataset(torch.utils.data.Dataset):
 
             self.bucket_manager.sort()
         else:
-            self.bucket_manager = BucketManager(False, (self.width, self.height), None, None, None)
+            self.bucket_manager = self.bucket_class(False, (self.width, self.height), None, None, None)
             self.bucket_manager.set_predefined_resos([(self.width, self.height)])  # ひとつの固定サイズbucketのみ
             for image_info in self.image_data.values():
                 image_width, image_height = image_info.image_size
-                image_info.bucket_reso, image_info.resized_size, _ = self.bucket_manager.select_bucket(image_width, image_height)
+                image_info.bucket_reso, image_info.resized_size, _ = self.bucket_manager.select_bucket(image_width, image_height, image_info)
 
         for image_info in self.image_data.values():
             for _ in range(image_info.num_repeats):
@@ -986,6 +987,9 @@ class BaseDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self._length
 
+    def flipped(self, index: int, image_info: ImageInfo, subset: Union[DreamBoothSubset, FineTuningSubset]) -> bool:
+        return subset.flip_aug and random.random() < 0.5  # not flipped or flipped with 50% chance
+
     def __getitem__(self, index):
         bucket = self.bucket_manager.buckets[self.buckets_indices[index].bucket_index]
         bucket_batch_size = self.buckets_indices[index].bucket_batch_size
@@ -1015,7 +1019,7 @@ class BaseDataset(torch.utils.data.Dataset):
             # in case of fine tuning, is_reg is always False
             loss_weights.append(self.prior_loss_weight if image_info.is_reg else 1.0)
 
-            flipped = subset.flip_aug and random.random() < 0.5  # not flipped or flipped with 50% chance
+            flipped = self.flipped(index, image_info, subset)
 
             # image/latentsを処理する
             if image_info.latents is not None:  # cache_latents=Trueの場合
@@ -1197,7 +1201,7 @@ class BaseDataset(torch.utils.data.Dataset):
         example = {}
         example["custom_attributes"] = custom_attributes  # may be list of empty dict
         example["loss_weights"] = torch.FloatTensor(loss_weights)
-        example["text_encoder_outputs_list"] = none_or_stack_elements(text_encoder_outputs_list, torch.FloatTensor)
+        example["text_encoder_outputs_list"] = none_or_stack_elements(text_encoder_outputs_list, torch.as_tensor)
         example["input_ids_list"] = none_or_stack_elements(input_ids_list, lambda x: x)
 
         # if one of alpha_masks is not None, we need to replace None with ones

@@ -105,6 +105,7 @@ class ControlNetDataset(BaseDataset):
             validation_split,
             validation_seed,
             resize_interpolation,
+            False,
             skip_image_resolution,
         )
 

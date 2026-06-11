@@ -27,6 +27,8 @@ from diffusers import DDPMScheduler
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from library import deepspeed_utils, model_util, sai_model_spec, strategy_base, strategy_sd
 
+from library.addift_util import split_batch_data_target, get_addift_timesteps
+
 import library.accelerator_setup as accelerator_setup
 import library.args as args_util
 import library.dataset as dataset_util
@@ -67,6 +69,7 @@ class NetworkTrainer:
     def __init__(self):
         self.vae_scale_factor = 0.18215
         self.is_sdxl = False
+        self.current_step = 0
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -368,6 +371,129 @@ class NetworkTrainer:
 
     # endregion
 
+    def addift_process_batch(
+        self,
+        data_batch,
+        target_batch,
+        data_latents,
+        target_latents,
+        data_text_encoder_conds,
+        target_text_encoder_conds,
+        unet,
+        network,
+        noise_scheduler,
+        weight_dtype,
+        accelerator,
+        args,
+        train_unet=True,
+    ):
+        first = ((self.current_step % 2) == 0) or args.addift_no_flip
+        if first:
+            min_t = 0 if args.min_timestep is None else args.min_timestep
+            max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+            current_step = self.current_step if args.addift_no_flip else self.current_step // 2
+            self.addift_timesteps = get_addift_timesteps(min_t, max_t, args.addift_timesteps_segments, current_step, data_latents.shape[0]).to(data_latents.device)
+        else:
+            data_latents, target_latents = target_latents, data_latents
+            data_batch, target_batch = target_batch, data_batch
+
+        noise, noisy_data_latents, _ = loss_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, data_latents, self.addift_timesteps)
+        _, noisy_target_latents, _ = loss_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, target_latents, self.addift_timesteps, noise)
+
+        network.set_enabled(False)
+
+        if args.gradient_checkpointing:
+            for x in noisy_target_latents:
+                x.requires_grad_(True)
+            for t in target_text_encoder_conds:
+                t.requires_grad_(True)
+
+        #    target_noise_pred = noise
+        # -) data_noise_pred   = noise
+        # ==============================
+        #    target_noise_pred - data_noise_pred = 0
+        #    target_noise_pred = data_noise_pred
+        with torch.no_grad(), accelerator.autocast():
+            data_noise_pred = self.call_unet(
+                args,
+                accelerator,
+                unet,
+                noisy_data_latents,
+                self.addift_timesteps,
+                data_text_encoder_conds,
+                data_batch,
+                weight_dtype,
+            ).detach()
+        network.set_enabled(True)
+        network.set_multiplier(args.addift_scale if first else -args.addift_scale * args.addift_diff_ratio)
+        with accelerator.autocast():
+            target_noise_pred = self.call_unet(
+                args,
+                accelerator,
+                unet,
+                noisy_target_latents.requires_grad_(train_unet),
+                self.addift_timesteps,
+                target_text_encoder_conds,
+                target_batch,
+                weight_dtype,
+            )
+
+        return data_noise_pred, target_noise_pred, self.addift_timesteps, None
+
+    def image_pair_process_batch(
+        self,
+        args,
+        accelerator,
+        noise_scheduler,
+        data_batch,
+        target_batch,
+        data_latents,
+        target_latents,
+        data_text_encoder_conds,
+        target_text_encoder_conds,
+        unet,
+        network,
+        weight_dtype,
+        train_unet,
+        is_train=True,
+    ):
+        if args.image_pair_training == "addift":
+            noise_pred, target, timesteps, weighting = self.addift_process_batch(
+                data_batch,
+                target_batch,
+                data_latents,
+                target_latents.to(device=accelerator.device, non_blocking=True),
+                data_text_encoder_conds,
+                target_text_encoder_conds,
+                unet,
+                network,
+                noise_scheduler,
+                weight_dtype,
+                accelerator,
+                args,
+                train_unet=train_unet,
+            )
+        elif args.image_pair_training == "kontext":
+            # Kontextのペア学習
+            target_batch["cond_latents"] = data_latents
+            target_batch["cond_latents_ids"] = data_text_encoder_conds
+            noise_pred, target, timesteps, weighting = self.get_noise_pred_and_target(
+                args,
+                accelerator,
+                noise_scheduler,
+                target_latents.to(device=accelerator.device, non_blocking=True),
+                target_batch,
+                target_text_encoder_conds,
+                unet,
+                network,
+                weight_dtype,
+                train_unet,
+                is_train=is_train,
+            )
+        else:
+            raise ValueError(f"Unknown image pair training mode: {args.image_pair_training}")
+        return noise_pred, target, timesteps, weighting
+
     def process_batch(
         self,
         batch,
@@ -391,11 +517,11 @@ class NetworkTrainer:
         """
         with torch.no_grad():
             if "latents" in batch and batch["latents"] is not None:
-                latents = typing.cast(torch.FloatTensor, batch["latents"].to(accelerator.device))
+                latents = typing.cast(torch.FloatTensor, batch["latents"])
             else:
                 # latentに変換
                 if args.vae_batch_size is None or len(batch["images"]) <= args.vae_batch_size:
-                    latents = self.encode_images_to_latents(args, vae, batch["images"].to(accelerator.device, dtype=vae_dtype))
+                    latents = self.encode_images_to_latents(args, vae, batch["images"].to(device=accelerator.device, dtype=vae_dtype, non_blocking=True))
                 else:
                     chunks = [
                         batch["images"][i : i + args.vae_batch_size] for i in range(0, len(batch["images"]), args.vae_batch_size)
@@ -403,7 +529,7 @@ class NetworkTrainer:
                     list_latents = []
                     for chunk in chunks:
                         with torch.no_grad():
-                            chunk = self.encode_images_to_latents(args, vae, chunk.to(accelerator.device, dtype=vae_dtype))
+                            chunk = self.encode_images_to_latents(args, vae, chunk.to(device=accelerator.device, dtype=vae_dtype, non_blocking=True))
                             list_latents.append(chunk)
                     latents = torch.cat(list_latents, dim=0)
 
@@ -457,12 +583,45 @@ class NetworkTrainer:
                     if encoded_text_encoder_conds[i] is not None:
                         text_encoder_conds[i] = encoded_text_encoder_conds[i]
 
+        # ペア学習を使う場合
+        if args.image_pair_training:
+            data_batch, target_batch = split_batch_data_target(batch)
+            data_latents = latents[0:-1:2]
+            target_latents = latents[1::2]
+            data_text_encoder_conds = [c[0:-1:2] for c in text_encoder_conds]
+            target_text_encoder_conds = [c[1::2] for c in text_encoder_conds]
+            noise_pred, target, timesteps, weighting = self.image_pair_process_batch(
+                args,
+                accelerator,
+                noise_scheduler,
+                data_batch,
+                target_batch,
+                data_latents,
+                target_latents,
+                data_text_encoder_conds,
+                target_text_encoder_conds,
+                unet,
+                network,
+                weight_dtype,
+                train_unet,
+                is_train,
+            )
+
+            huber_c = loss_util.get_huber_threshold_if_needed(args, timesteps, noise_scheduler)
+            loss = loss_util.conditional_loss(target.float(), noise_pred.float(), args.loss_type, "none", huber_c).to(target_latents.device)
+            if weighting is not None:
+                loss = loss * weighting
+            loss = loss.mean([1, 2, 3])
+            loss = loss * data_batch["loss_weights"] * target_batch["loss_weights"]
+            loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+            return loss.mean()
+
         # sample noise, call unet, get target
         noise_pred, target, timesteps, weighting = self.get_noise_pred_and_target(
             args,
             accelerator,
             noise_scheduler,
-            latents,
+            latents.to(device=accelerator.device, non_blocking=True),
             batch,
             text_encoder_conds,
             unet,
@@ -743,6 +902,18 @@ class NetworkTrainer:
                 metadata["ss_new_vae_hash"] = model_io.calculate_sha256(vae_name)
                 vae_name = os.path.basename(vae_name)
             metadata["ss_vae_name"] = vae_name
+
+        if args.image_pair_training:
+            image_pair_training_dict = {}
+            if args.image_pair_training == "addift":
+                image_pair_training_dict["addift_enabled"] = True
+                image_pair_training_dict["addift_scale"] = args.addift_scale
+                image_pair_training_dict["addift_diff_ratio"] = args.addift_diff_ratio
+                image_pair_training_dict["addift_timesteps_segments"] = args.addift_timesteps_segments
+                image_pair_training_dict["addift_no_flip"] = args.addift_no_flip
+            elif args.image_pair_training == "kontext":
+                image_pair_training_dict["kontext_enabled"] = True
+            metadata["ss_image_pair_training"] = json.dumps(image_pair_training_dict)
 
         metadata = {k: str(v) for k, v in metadata.items()}
 
@@ -1187,7 +1358,7 @@ class NetworkTrainer:
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset_group,
             batch_size=1,
-            shuffle=True,
+            shuffle=not args.image_pair_training,
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
@@ -1586,6 +1757,7 @@ class NetworkTrainer:
 
             for step, batch in enumerate(skipped_dataloader or train_dataloader):
                 current_step.value = global_step
+                self.current_step = global_step
                 if initial_step > 0:
                     initial_step -= 1
                     continue

@@ -34,26 +34,32 @@ def get_timesteps(min_timestep: int, max_timestep: int, b_size: int, device: tor
 
 
 def get_noise_noisy_latents_and_timesteps(
-    args, noise_scheduler, latents: torch.FloatTensor
+    args,
+    noise_scheduler,
+    latents: torch.FloatTensor,
+    timesteps: Optional[torch.IntTensor] = None,
+    noise: Optional[torch.FloatTensor] = None
 ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.IntTensor]:
     # Sample noise that we'll add to the latents
-    noise = torch.randn_like(latents, device=latents.device)
-    if args.noise_offset:
-        if args.noise_offset_random_strength:
-            noise_offset = torch.rand(1, device=latents.device) * args.noise_offset
-        else:
-            noise_offset = args.noise_offset
-        noise = custom_train_functions.apply_noise_offset(latents, noise, noise_offset, args.adaptive_noise_scale)
-    if args.multires_noise_iterations:
-        noise = custom_train_functions.pyramid_noise_like(
-            noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
-        )
+    if noise is None:
+        noise = torch.randn_like(latents, device=latents.device)
+        if args.noise_offset:
+            if args.noise_offset_random_strength:
+                noise_offset = torch.rand(1, device=latents.device) * args.noise_offset
+            else:
+                noise_offset = args.noise_offset
+            noise = custom_train_functions.apply_noise_offset(latents, noise, noise_offset, args.adaptive_noise_scale)
+        if args.multires_noise_iterations:
+            noise = custom_train_functions.pyramid_noise_like(
+                noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
+            )
 
-    # Sample a random timestep for each image
-    b_size = latents.shape[0]
-    min_timestep = 0 if args.min_timestep is None else args.min_timestep
-    max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
-    timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
+    if timesteps is None:
+        # Sample a random timestep for each image
+        b_size = latents.shape[0]
+        min_timestep = 0 if args.min_timestep is None else args.min_timestep
+        max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+        timesteps = get_timesteps(min_timestep, max_timestep, b_size, latents.device)
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)

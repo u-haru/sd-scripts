@@ -1070,6 +1070,36 @@ def add_dataset_arguments(
         parser.add_argument(
             "--reg_data_dir", type=str, default=None, help="directory for regularization images / 正則化画像データのディレクトリ"
         )
+        parser.add_argument(
+            "--image_pair_training",
+            type=str, default=None,
+            choices=["kontext", "addift"],
+            help="Enable pair training like Kontext or ADDifT (Alternating Direct Difference Training) - Kontext is implemented only in Flux / KontextやADDifTのような画像ペアの学習を有効にする - KontextはFluxでのみ実装"
+        )
+        # ADDifT arguments
+        parser.add_argument(
+            "--addift_scale",
+            type=float,
+            default=0.5,
+            help="scale for ADDifT / ADDifのスケール",
+        )
+        parser.add_argument(
+            "--addift_diff_ratio",
+            type=float,
+            default=1.0,
+            help="diff ratio for ADDifT / ADDifの反転学習の差分比率",
+        )
+        parser.add_argument(
+            "--addift_timesteps_segments",
+            type=int,
+            default=5,
+            help="Number of segments to divide timestep range into (default: 5) / タイムステップ範囲を分割するセグメント数（デフォルト: 5）",
+        )
+        parser.add_argument(
+            "--addift_no_flip",
+            action="store_true",
+            help="Disable flipping for ADDifT / ADDifTの反転学習を無効にする",
+        )
 
     if support_caption:
         # caption dataset
