@@ -611,6 +611,14 @@ class NetworkTrainer:
             loss = loss_util.conditional_loss(target.float(), noise_pred.float(), args.loss_type, "none", huber_c).to(target_latents.device)
             if weighting is not None:
                 loss = loss * weighting
+            if (
+                args.image_pair_training == "addift"
+                and "alpha_masks" in target_batch
+                and target_batch["alpha_masks"] is not None
+            ):
+                mask_image = target_batch["alpha_masks"].to(device=loss.device, dtype=loss.dtype).unsqueeze(1)
+                mask_image = torch.nn.functional.interpolate(mask_image, size=loss.shape[2:], mode="area")
+                loss = loss * mask_image
             loss = loss.mean([1, 2, 3])
             loss = loss * data_batch["loss_weights"] * target_batch["loss_weights"]
             loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
