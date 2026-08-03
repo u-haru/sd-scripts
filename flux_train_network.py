@@ -414,9 +414,18 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
         noise = torch.randn_like(latents)
         bsz = latents.shape[0]
 
+        # Per-sample timestep sampling offset from custom_attributes: timestep_sampling = { offset = ... }
+        tso = None
+        if is_train and "custom_attributes" in batch:
+            offsets = [ca.get("timestep_sampling", {}).get("offset", 0.0) for ca in batch["custom_attributes"]]
+            t = torch.tensor(offsets, dtype=torch.float32)
+            if t.abs().sum() > 0:
+                tso = t
+
         # get noisy model input and timesteps
         noisy_model_input, timesteps, sigmas = flux_train_utils.get_noisy_model_input_and_timesteps(
-            args, noise_scheduler, latents, noise, accelerator.device, weight_dtype
+            args, noise_scheduler, latents, noise, accelerator.device, weight_dtype,
+            timestep_sampling_offset=tso,
         )
 
         # pack latents and get img_ids
@@ -572,10 +581,18 @@ class FluxNetworkTrainer(train_network.NetworkTrainer):
 
         noise = torch.randn_like(data_latents)
         noisy_data_latents, _, _ = flux_train_utils.get_noisy_model_input_and_timesteps(
-            args, noise_scheduler, data_latents, noise, accelerator.device, weight_dtype, timesteps=addift_timesteps, sigmas=sigmas
+            args, noise_scheduler, data_latents, noise, accelerator.device, weight_dtype, timesteps=addift_timesteps, sigmas=sigmas, timestep_sampling_offset=None
         )
+
+        # Per-sample timestep sampling offset from custom_attributes: timestep_sampling = { offset = ... }
+        tso = None
+        if "custom_attributes" in target_batch:
+            offsets = [ca.get("timestep_sampling", {}).get("offset", 0.0) for ca in target_batch["custom_attributes"]]
+            t = torch.tensor(offsets, dtype=torch.float32)
+            if t.abs().sum() > 0:
+                tso = t
         noisy_target_latents, _, _ = flux_train_utils.get_noisy_model_input_and_timesteps(
-            args, noise_scheduler, target_latents, noise, accelerator.device, weight_dtype, timesteps=addift_timesteps, sigmas=sigmas
+            args, noise_scheduler, target_latents, noise, accelerator.device, weight_dtype, timesteps=addift_timesteps, sigmas=sigmas, timestep_sampling_offset=tso
         )
 
         network.set_enabled(False)
