@@ -71,6 +71,9 @@ class NetworkTrainer:
         self.vae_scale_factor = 0.18215
         self.is_sdxl = False
         self.current_step = 0
+        # ADDifT: timesteps of the first micro-step of a pair, reused by the second one. Keyed by is_train
+        self._addift_pair_cache: dict[bool, tuple] = {}
+        self._addift_segment_step: Optional[int] = None  # counter for --addift_timesteps_segments
         self.run_controller = run_control.RunController(None)  # disabled until train() creates the real one
 
     # TODO 他のスクリプトと共通化する
@@ -509,6 +512,59 @@ class NetworkTrainer:
 
     # endregion
 
+    def sample_addift_timesteps(self, args, noise_scheduler, num_pairs, latent_hw, device, weight_dtype, segment_step):
+        """Sample the ADDifT timesteps for one pair. Returns (timesteps, sigmas); sigmas is None for non flow-matching models."""
+        min_t = 0 if args.min_timestep is None else args.min_timestep
+        max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+        timesteps = get_addift_timesteps(min_t, max_t, args.addift_timesteps_segments, segment_step, num_pairs).to(device)
+        return timesteps, None
+
+    def prepare_addift_pair(self, args, accelerator, noise_scheduler, batch, weight_dtype, is_train=True):
+        """Set the direction and the timesteps of an ADDifT micro-step to `batch` ("addift_first", "addift_timesteps").
+
+        The dataset returns each batch twice in a row (`image_pair_index` = (dataset index, pair index, half)): the first
+        micro-step trains data -> target, the second one target -> data with the same timesteps. The timesteps are sampled
+        fresh at each first micro-step, so the same pair gets different timesteps each time it is used (epochs, repeats).
+
+        This is called in the main thread before the micro-step is dispatched, because the two micro-steps of a pair may
+        run on different devices at the same time with --replica_devices. It does nothing if the batch is already prepared.
+        """
+        if args.image_pair_training != "addift" or "addift_timesteps" in batch:
+            return
+
+        pair_index = batch.get("image_pair_index")
+        key = (pair_index[0], pair_index[1]) if pair_index is not None else None
+        half = pair_index[2] if pair_index is not None else 0
+        first = half == 0 or args.addift_no_flip
+
+        cached = self._addift_pair_cache.pop(is_train, None)
+        if not first and cached is not None and key is not None and cached[0] == key:
+            timesteps_and_sigmas = cached[1]
+        else:
+            # first micro-step, --addift_no_flip, or the first micro-step was skipped (e.g. resumed in the middle of a pair)
+            if self._addift_segment_step is None:
+                # continue the segment cycle on resume: the number of pair uses so far
+                micro_steps = self.current_step * args.gradient_accumulation_steps
+                self._addift_segment_step = micro_steps if args.addift_no_flip else micro_steps // 2
+            segment_step = self._addift_segment_step
+            if is_train:
+                self._addift_segment_step += 1
+
+            latents = batch.get("latents")
+            if latents is not None:
+                n, latent_hw = latents.shape[0], (latents.shape[-2], latents.shape[-1])
+            else:
+                images = batch["images"]  # latents are encoded later in process_batch: the VAEs of the models are 8x
+                n, latent_hw = images.shape[0], (images.shape[-2] // 8, images.shape[-1] // 8)
+            timesteps_and_sigmas = self.sample_addift_timesteps(
+                args, noise_scheduler, n // 2, latent_hw, accelerator.device, weight_dtype, segment_step
+            )
+            if not args.addift_no_flip:
+                self._addift_pair_cache[is_train] = (key, timesteps_and_sigmas)
+
+        batch["addift_first"] = first
+        batch["addift_timesteps"] = timesteps_and_sigmas
+
     def addift_process_batch(
         self,
         data_batch,
@@ -525,18 +581,14 @@ class NetworkTrainer:
         args,
         train_unet=True,
     ):
-        first = ((self.current_step % 2) == 0) or args.addift_no_flip
-        if first:
-            min_t = 0 if args.min_timestep is None else args.min_timestep
-            max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
-            current_step = self.current_step if args.addift_no_flip else self.current_step // 2
-            self.addift_timesteps = get_addift_timesteps(min_t, max_t, args.addift_timesteps_segments, current_step, data_latents.shape[0]).to(data_latents.device)
-        else:
+        first = data_batch["addift_first"]  # set by prepare_addift_pair
+        addift_timesteps = data_batch["addift_timesteps"][0].to(data_latents.device)
+        if not first:
             data_latents, target_latents = target_latents, data_latents
             data_batch, target_batch = target_batch, data_batch
 
-        noise, noisy_data_latents, _ = loss_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, data_latents, self.addift_timesteps)
-        _, noisy_target_latents, _ = loss_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, target_latents, self.addift_timesteps, noise)
+        noise, noisy_data_latents, _ = loss_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, data_latents, addift_timesteps)
+        _, noisy_target_latents, _ = loss_util.get_noise_noisy_latents_and_timesteps(args, noise_scheduler, target_latents, addift_timesteps, noise)
 
         network.set_enabled(False)
 
@@ -557,7 +609,7 @@ class NetworkTrainer:
                 accelerator,
                 unet,
                 noisy_data_latents,
-                self.addift_timesteps,
+                addift_timesteps,
                 data_text_encoder_conds,
                 data_batch,
                 weight_dtype,
@@ -570,13 +622,13 @@ class NetworkTrainer:
                 accelerator,
                 unet,
                 noisy_target_latents.requires_grad_(train_unet),
-                self.addift_timesteps,
+                addift_timesteps,
                 target_text_encoder_conds,
                 target_batch,
                 weight_dtype,
             )
 
-        return data_noise_pred, target_noise_pred, self.addift_timesteps, None
+        return data_noise_pred, target_noise_pred, addift_timesteps, None
 
     def image_pair_process_batch(
         self,
@@ -723,6 +775,8 @@ class NetworkTrainer:
 
         # ペア学習を使う場合
         if args.image_pair_training:
+            # no-op in training (prepared in the main loop); validation and others are prepared here
+            self.prepare_addift_pair(args, accelerator, noise_scheduler, batch, weight_dtype, is_train=is_train)
             data_batch, target_batch = split_batch_data_target(batch)
             data_latents = latents[0:-1:2]
             target_latents = latents[1::2]
@@ -758,6 +812,9 @@ class NetworkTrainer:
                 mask_image = torch.nn.functional.interpolate(mask_image, size=loss.shape[2:], mode="area")
                 loss = loss * mask_image
             loss = loss.mean([1, 2, 3])
+            if is_train:
+                # one row per pair, by the data image (before loss_weights and post_process_loss, as below)
+                self.run_controller.record_sample_losses(data_batch, timesteps, loss)
             loss = loss * data_batch["loss_weights"] * target_batch["loss_weights"]
             loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
             return loss.mean()
@@ -2029,6 +2086,8 @@ class NetworkTrainer:
 
                     # preprocess batch for each model
                     self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train=True)
+                    # ADDifT: decide the direction and the timesteps here in the main thread (see prepare_addift_pair)
+                    self.prepare_addift_pair(args, accelerator, noise_scheduler, batch, weight_dtype, is_train=True)
 
                     loss = self.forward_backward(
                         args,

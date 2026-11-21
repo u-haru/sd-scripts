@@ -27,7 +27,7 @@ import library.compile_utils as compile_utils
 import library.model_io as model_io
 import library.replica_trainer as replica_trainer
 from library.dataset import DatasetGroup, MinimalDataset
-from library.addift_util import map_addift_range
+from library.addift_util import sample_flow_addift_timesteps
 import train_network
 from library.utils import setup_logging
 
@@ -357,6 +357,9 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
 
         return model_pred, target, timesteps, weighting
 
+    def sample_addift_timesteps(self, args, noise_scheduler, num_pairs, latent_hw, device, weight_dtype, segment_step):
+        return sample_flow_addift_timesteps(args, noise_scheduler, num_pairs, latent_hw, device, weight_dtype, segment_step)
+
     def addift_process_batch(
         self,
         data_batch,
@@ -400,36 +403,11 @@ class AnimaNetworkTrainer(train_network.NetworkTrainer):
                 )
             return model_pred.squeeze(2)
 
-        first = ((self.current_step % 2) == 0) or args.addift_no_flip
-        if first:
-            min_t = 0 if args.min_timestep is None else args.min_timestep
-            max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
-            latents_for_timesteps = data_latents.squeeze(2) if data_latents.ndim == 5 else data_latents
-            sigmas, addift_timesteps = flux_train_utils.get_sigma_and_timesteps(
-                args, noise_scheduler, latents_for_timesteps, accelerator.device, weight_dtype
-            )
-            current_step = self.current_step if args.addift_no_flip else self.current_step // 2
-            sigmas = map_addift_range(
-                min_t / noise_scheduler.config.num_train_timesteps,
-                max_t / noise_scheduler.config.num_train_timesteps,
-                args.addift_timesteps_segments,
-                1,
-                current_step,
-                sigmas,
-            )
-            addift_timesteps = map_addift_range(
-                min_t,
-                max_t,
-                args.addift_timesteps_segments,
-                noise_scheduler.config.num_train_timesteps,
-                current_step,
-                addift_timesteps,
-            )
-            self.addift_timesteps = (addift_timesteps, sigmas)
-        else:
+        first = data_batch["addift_first"]  # set by NetworkTrainer.prepare_addift_pair
+        addift_timesteps, sigmas = data_batch["addift_timesteps"]
+        if not first:
             data_latents, target_latents = target_latents, data_latents
             data_batch, target_batch = target_batch, data_batch
-        addift_timesteps, sigmas = self.addift_timesteps
 
         if data_latents.ndim == 5:
             data_latents = data_latents.squeeze(2)

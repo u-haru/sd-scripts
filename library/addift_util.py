@@ -28,6 +28,28 @@ def map_addift_range(range_min: float, range_max: float, num_segments: int, max_
     end = min(start + segment_size, range_max)
     return x * ((end - start) / max_timesteps) + start
 
+def sample_flow_addift_timesteps(
+    args, noise_scheduler, num_pairs: int, latent_hw: tuple[int, int], device, dtype, segment_step: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Flow matching系 (FLUX, Anima) のADDifT用timestepsとsigmasを生成する。
+    --timestep_sampling 等で引いた値を、segment_stepに対応する区間 (--min/max_timestep を addift_timesteps_segments で分割) に写像する。
+    latentの形状から使うのはバッチサイズと高さ・幅だけなので、実体のないmetaテンソルで代用する。
+    """
+    from library import flux_train_utils
+
+    min_t = 0 if args.min_timestep is None else args.min_timestep
+    max_t = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+    num_train_timesteps = noise_scheduler.config.num_train_timesteps
+    latents_like = torch.empty((num_pairs, 1, latent_hw[0], latent_hw[1]), device="meta")
+    sigmas, timesteps = flux_train_utils.get_sigma_and_timesteps(args, noise_scheduler, latents_like, device, dtype)
+    sigmas = map_addift_range(
+        min_t / num_train_timesteps, max_t / num_train_timesteps, args.addift_timesteps_segments, 1, segment_step, sigmas
+    )
+    timesteps = map_addift_range(min_t, max_t, args.addift_timesteps_segments, num_train_timesteps, segment_step, timesteps)
+    return timesteps, sigmas
+
+
 class PairBucketManager(train_util.BucketManager):
     def __init__(self, no_upscale, max_reso, min_size, max_size, reso_steps):
         super().__init__(no_upscale, max_reso, min_size, max_size, reso_steps)
@@ -95,7 +117,7 @@ def split_batch_data_target(batch: dict) -> tuple[dict, dict]:
     """
     data = {}
     target = {}
-    KEYS = ["custom_attributes", "loss_weights", "text_encoder_outputs_list", "input_ids_list", "alpha_masks", "images", "latents", "captions", "original_sizes_hw", "crop_top_lefts", "target_sizes_hw", "flippeds", "network_multipliers", "image_keys"]
+    KEYS = ["custom_attributes", "loss_weights", "text_encoder_outputs_list", "input_ids_list", "alpha_masks", "images", "latents", "captions", "original_sizes_hw", "crop_top_lefts", "target_sizes_hw", "flippeds", "network_multipliers", "image_keys", "subset_indices"]
     for key, value in batch.items():
         if key in KEYS and isinstance(value, (list, torch.Tensor, np.ndarray, tuple)):
             if key == "input_ids_list" or key =="text_encoder_outputs_list":

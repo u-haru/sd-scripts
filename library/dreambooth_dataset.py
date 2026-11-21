@@ -379,7 +379,11 @@ class DreamBoothDataset(BaseDataset):
 
     def __getitem__(self, index: int):
         if self.image_pair_training:
-            return super().__getitem__(index//2)
+            example = super().__getitem__(index // 2)
+            # 同じバッチが2回続けて返る。1回目(half=0)が順方向、2回目(half=1)が逆方向 (ADDifT)。
+            # 学習側はこれを見て、同じペアの1回目と2回目に同じtimestepsを使う (NetworkTrainer.prepare_addift_pair)
+            example["image_pair_index"] = (self.dataset_index, index // 2, index % 2)
+            return example
         return super().__getitem__(index)
 
     def shuffle_buckets(self):
